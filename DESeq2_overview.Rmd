@@ -1,0 +1,274 @@
+---
+title: "Overview Organoids RNAseq data"
+author: "Leticia G Leon"
+date: "05/08/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(gplots)
+library(edgeR)
+library(DESeq2)
+library(FactoMineR)
+library(biomaRt)
+library(Rsubread)
+library(Biobase)
+library(getopt)
+library(vsn) 
+library(BiocParallel)
+library(GenomicAlignments)
+library(GenomicFeatures)
+library(Rsamtools)
+library(pheatmap)
+library(RColorBrewer)
+library(PoiClaClu)
+library(genefilter)
+library(ggbeeswarm)
+library(apeglm)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+library(ReportingTools)
+library(Gviz)
+library(sva)
+library(RUVSeq)
+library(hexbin)
+source("/path/diffexpr4.R")
+```
+
+set working directory
+```{r workingdirectory, warning=FALSE, message=FALSE}
+setwd("/path/Overview_cleancounts/")
+reportNames <- c("Overview_Syzmon")
+```
+
+Load data
+In this case we load teh clean data and remove the column with gene Length
+In those data we have the gene length in the column
+```{r loadData, warning=FALSE, message=FALSE}
+##### Remember the floating numbers in the Ensembl ids, only with exons
+Org_de<- read.delim("/path/filetercounts_lenght.txt", header = T, sep = "\t", as.is = T, row.names = 1)
+head(Org_de)
+ss_Org <- read.csv("/path/ss_norm.csv",   sep = ";")
+head(ss_Org)
+
+identical(as.character(ss_Org$Patient.ID), colnames(Org_de[,-1])) # they looks the same !!!!!!!!!! They are the same, it is puntuation
+
+```
+
+Creating the DESeq2 object, link with counts and metadata
+```{r ddsmatObject, warning=FALSE, message=FALSE}
+ddsMat <- DESeqDataSetFromMatrix(countData = Org_de[,-1], 
+                                 colData = ss_Org,
+                                 design = ~ TypeLession )
+
+```
+
+
+```{r rlogCalc, warning=FALSE, message=FALSE}
+dds_rlog <- rlog(ddsMat, blind = T,   fitType = "mean") #blind is to make it completely unsupervised, no looking at the conditons or not 
+head(assay(dds_rlog)) #this is because the data is store at the assay slot (R)
+write.table(assay(dds_rlog), "/path/organoidsN_rlogNorm.txt", sep = "\t" , row.names=T, col.names=T, quote=F)
+```
+
+```{r plotingrlog,  warning=FALSE, message=FALSE}
+ddsMat <- estimateSizeFactors(ddsMat)
+
+df <- bind_rows(
+  as_data_frame(log2(counts(ddsMat, normalized=T)[,1:2]+1)) %>%
+    mutate(transformation="log2(x+1)"),
+  #as_data_frame(assay(dds_vst)[, 1:2]) %>% dplyr::mutate(transformation = "vst"),
+  as_data_frame(assay(dds_rlog)[,1:2])%>% mutate(transformation="rlog"))
+
+colnames(df)[1:2] <- c("x", "y")
+
+ggplot(df, aes(x=x, y=y)) + 
+  geom_hex(bins = 80) +
+  coord_fixed() +
+  facet_grid(. ~ transformation)
+  
+```
+
+########################################################################################################################################################################################################################################################################################################################
+# Data  normalize checking, using different tols combined with the rlog(DESeq2) tools
+# Now we check the distances using the rlog matrix
+```{r distrlog, warning=FALSE, message=FALSE}
+sampleDists <- dist(t(assay(dds_rlog)))
+
+#sampleDist
+sampleDistMatrix <- as.matrix( sampleDists )
+rownames(sampleDistMatrix) <- paste( dds_rlog$Patient.ID, dds_rlog$TypeLession, sep = "-")
+colnames(sampleDistMatrix) <- NULL
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows = sampleDists,
+         clustering_distance_cols = sampleDists,
+         col = colors)
+```
+
+
+To calculate and see as poisson distribution
+```{r posionHeatm, warning=FALSE, message=FALSE}
+poisd <- PoissonDistance(t(counts(ddsMat)))
+
+samplePoisDistMatrix <- as.matrix( poisd$dd )
+rownames(samplePoisDistMatrix) <- paste( ddsMat$Patient.ID, ddsMat$TypeLession, sep="-" )
+colnames(samplePoisDistMatrix) <- NULL
+pheatmap(samplePoisDistMatrix,
+         clustering_distance_rows = poisd$dd,
+         clustering_distance_cols = poisd$dd,
+         col = colors)
+```
+
+PCA
+```{r PCA, warning=FALSE, message=FALSE}
+plotPCA(dds_rlog, intgroup = c("TypeLession", "Grade_dysplasia"))
+
+
+# Using day and type column information for the PCAs
+pcaData <- plotPCA(dds_rlog, intgroup = c( "TypeLession", "Grade_dysplasia"), returnData = TRUE)  
+pcaData
+
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+
+ggplot(pcaData, aes(x = PC1, y = PC2, color = TypeLession, shape = Grade_dysplasia)) +
+  geom_point(size =3) +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  coord_fixed()
+
+## Here with day and group the PCAs
+pcaDatag <- plotPCA(dds_rlog, intgroup = c( "Grade_dysplasia", "TypeLession"), returnData = TRUE)
+pcaDatag
+
+percentVar <- round(100 * attr(pcaData, "percentVar")) # Is giving how much this Variab contribute in the PCA in 100% 
+
+ggplot(pcaDatag, aes(x = PC1, y = PC2, color = Grade_dysplasia, shape = TypeLession)) +
+  geom_point(size =3) +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +  # How is going to appear in the plot
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  coord_fixed()
+
+
+```
+
+
+```{r heatmap, warning=FALSE, message=FALSE}
+heatmap(as.matrix(assay(dds_rlog)))
+```
+
+stable genes check
+```{r, warning=FALSE, message=FALSE}
+stable.org_de <- Org_de[c("ACTB", "GAPDH"),]
+head(stable.org_de)
+```
+
+Distribution
+use Norm values
+```{r, warning=FALSE, message=FALSE}
+hist(Org_de[,-1])
+```
+
+
+
+##############################################################################################################################################################################################################################################
+Overview using a code written by Szymon Kielbasa at LUMC
+https://www.linkedin.com/in/szymonkielbasa/?originalSubdomain=nl
+##### Do NOT use the rownames option loading teh counts in this case
+Data was loaded before at the beginning 
+```{r loaddata, warning=FALSE, message=FALSE}
+Org_de<- read.delim("/path/filetercounts_org_lenght_wcp.txt", header = T, sep = "\t", as.is = T)
+head(Org_de)
+#Remove length
+Organoid <- Org_de[,-2]
+head(Organoid)
+ss_Org <- read.csv("/path/ss_norm_wcp.csv",   sep = ";")
+head(ss_Org)
+
+identical(as.character(ss_Org$sample), colnames(Organoid[,-1])) # they looks the same !!!!!!!!!! They are the same, it is puntuation
+
+```
+```{r}
+#ss_Orgs <- ss_Org %>% select(Patient.ID = FileId) %>% filter( feature %>% colnames(Org_de))
+```
+
+Star with Szymon approach overview, check colnames in counts are the same as patients id in the ss
+```{r}
+ss_Orgs <- ss_Org %>% filter( sample %in% colnames( Organoid) )
+head(ss_Orgs)
+```
+compulsory, 1st column in ss "samole", counts with no rownames, feature as 1st column
+clean up sample sheet, set proper reference levels
+```{r}
+all_ddd <- sascExp(Organoid, ss_Orgs, minMeanLogCpm = 2 )
+class(all_ddd)
+```
+
+```{r}
+all_ddd <- selectFeatures(all_ddd, minMeanLog2CpmFeatures( all_ddd, minMeanLog2Cpm = 2 ) );
+#all_ddd <- addRefflatAnnotations( all_ddd, "genes.tsv.gz" ); # prepare with refflat2tsv.pl script
+all_ddd <- setSubjectGroupVars( all_ddd, "sample", "g" );
+#all_ddd <- addEnsemblAnnotations( all_ddd, refId = "mouse" );
+class(all_ddd)
+```
+Summary ALignment 
+```{r}
+#pdf("alignment_sumplot_cmb.pdf")
+par(mfrow = c(1,1))
+alignmentSummaryPlot(all_ddd, flip = FALSE) + facet_wrap(~ TypeLession, scales= "free" )
+#join  by sample
+alignmentSummaryPlot(all_ddd, flip = FALSE ) + facet_wrap( ~ Grade_dysplasia, scales = "free" )
+alignmentSummaryPlot(all_ddd, flip = FALSE ) + facet_wrap( ~ sample, scales = "free" )
+
+#dev.off
+
+```
+Distribution of the rawCounts
+```{r}
+#pdf("countDensityPlot_cmb.pdf")
+par(mfrow = c(1,1))
+countsDensityPlot( all_ddd, colorVar = "TypeLession", linetypeVar = NULL ) + facet_grid( Grade_dysplasia ~ TypeLession )
+#dev.off()
+
+```
+Norm counts
+```{r}
+all_ddn <- tmmNormalizedExp( all_ddd );
+```
+Distribution of the NormCouns
+```{r}
+#pdf("countDensityPlot_cmb.pdf")
+par(mfrow = c(1,1))
+countsDensityPlot( all_ddd, colorVar = "TypeLession", linetypeVar = NULL ) + facet_grid( Grade_dysplasia ~ TypeLession )
+#dev.off()
+
+```
+
+
+PCA
+```{r}
+#pdf("PCA_cmb.pdf")
+par(mfrow = c(1,1))
+pcaDimsPlot( all_ddn, colorVar = "TypeLession", labelVar = NULL, dims = 1:2 )
+pcaDimsPlot( all_ddn, colorVar = "TypeLession", dims = 1:2 )
+pcaDimsPlot( all_ddn, colorVar = "Grade_dysplasia", labelVar = NULL, dims = 1:2 ) + facet_wrap( ~ TypeLession, scales = "free" )
+pcaDimsPlot( all_ddn, colorVar = "TypeLession", dims = 1:2 ) + facet_wrap( ~ Grade_dysplasia, scales = "free" )
+#dev.off()
+
+
+```
+Write Report
+```{r}
+writeReport( all_ddn, names = reportNames )
+```
+
+
+
+################################################################################################################################# The End
+```{r}
+sessionInfo()
+Sys.info()
+```

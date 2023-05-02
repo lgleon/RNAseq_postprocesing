@@ -1,0 +1,178 @@
+---
+title: "MCP_counter and EPIC using Immunodeconv "
+author: "Leticia G Leon"
+date: "1/10/2021"
+output: html_document
+---
+
+This script is meant to run MCP_counter and EPIC using immunedeconv (an R package for unified access to computational methods for estimating immune cell fractions from bulk RNA sequencing data).
+Please follow the instructions in https://icbi-lab.github.io/immunedeconv/
+To install it, before you run this code.
+
+#```{r setup, include=FALSE}
+#done, installed
+library(devtools)
+install_github("ebecht/MCPcounter",ref="master", subdir="Source")
+#```
+
+#```{r}
+#Done, installed 
+install.packages("remotes")
+#library(remotes)
+remotes::install_github("icbi-lab/immunedeconv")
+#```
+
+Example of using Immunedeconv, a library that is using MCPcount as one of the methods to calculate the stromal infiltration
+Libraries
+```{r libraries, message=FALSE, warning=FALSE}
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(immunedeconv)
+library(tibble)
+library(MCPcounter)
+```
+
+```{r load, message=FALSE, warning=FALSE}
+immunedeconv::dataset_racle
+knitr::kable(dataset_racle$expr_mat[1:5, ])
+```
+
+For immmunedeconv the input must be tpm-Nomr or Not log-transformed
+```{r data, message=FALSE, warning=FALSE}
+#for MCP_counter there is not need of Norm, but we can use TPM/RPKM is we want
+
+C5_mcp<- as.matrix(read.delim("/Users/path/to/countfile/name.counts", row.names = 1))
+class(C5_mcp)
+#head(C5_mcp)
+dim(C5_mcp)
+#head(knitr::kable(C5_mcp, digits = 2))
+
+```
+
+### New part to remover the outliers and make the tmp Norm and see how it looks
+
+Removing outliers before we Norm
+```{r clean, message=FALSE, warning=FALSE}
+#We need to remove columns (33, 54, 68)
+C5_mcp <- C5_mcp[,-c(33, 54, 68)]
+```
+```{r df, message=FALSE, warning=FALSE}
+C5_mcp <- as.data.frame(C5_mcp)
+```
+
+Epic Needs the data Normalized RPKM or TPM
+Here we calculate tpm to use in both to test the results in both methods
+```{r tpmGoodfunc, warning=FALSE, message=FALSE}
+countToTpm <- function(cuentas, effLen)
+{
+    rate <- log(cuentas) - log(effLen)
+    denom <- log(sum(exp(rate)))
+    exp(rate - denom + log(1e6))
+}
+
+countToFpkm <- function(counts, effLen)
+{
+    N <- sum(counts)
+    exp( log(counts) + log(1e9) - log(effLen) - log(N) )
+}
+
+fpkmToTpm <- function(fpkm)
+{
+    exp(log(fpkm) - log(sum(fpkm)) + log(1e6))
+}
+
+countToEffCounts <- function(counts, len, effLen)
+{
+    counts * (len / effLen)
+}
+```
+```{r tpmGood,warning=FALSE, message=FALSE}
+#countDf$effLength <- countDf$length - 203.7 + 1
+tpm_c5 <- with(C5_mcp, countToTpm(C5_mcp[,-1], C5_mcp$Length))
+```
+####Save data tpm
+```{r savetpm, warning=FALSE, message=FALSE}
+write.table(tpm_c5, "/Users/path/ to / tmpNorm/rnaNOrm_tpm_lenght.txt", sep = "\t" , row.names=T, col.names=T, quote=F)
+```
+
+```{r methods, message=FALSE, warning=FALSE}
+deconvolution_methods
+```
+
+how to use it
+```{r howto, warning=FALSE, message=FALSE}
+#resC5_epic = deconvolute(C5_mcp[,-1], "epic" , tumor = TRUE)
+#resC5_mcp = deconvolute(C5_mcp[,-1], "mcp_counter")# , tumor = TRUE)
+```
+With Normalized data 
+```{r runourdata, message=FALSE, warning=FALSE}
+resC5_epic = deconvolute(tpm_c5[,-1], "epic" , tumor = TRUE)
+resC5_mcp = deconvolute(tpm_c5[,-1], "mcp_counter")# , tumor = TRUE)
+```
+
+Plotting
+```{r plotMCP, message=FALSE, warning=FALSE}
+resC5_mcp %>%
+  gather(sample, fraction, -cell_type) %>%
+  # plot as stacked bar chart
+  ggplot(aes(x=sample, y=fraction, fill=cell_type)) +
+    geom_bar(stat='identity') +
+    coord_flip() +
+    scale_fill_brewer(palette="Paired") +
+    scale_x_discrete(limits = rev(levels(resC5_mcp)))
+```
+for EPIC
+```{r plotEpic, message=FALSE, warning=FALSE}
+resC5_epic %>%
+  gather(sample, fraction, -cell_type) %>%
+  # plot as stacked bar chart
+  ggplot(aes(x=sample, y=fraction, fill=cell_type)) +
+    geom_bar(stat='identity') +
+    coord_flip() +
+    scale_fill_brewer(palette="Paired") +
+    scale_x_discrete(limits = rev(levels(resC5_epic)))
+```
+
+
+
+
+
+Scatter plots for mcp_counter
+```{r scaterMCP, message=FALSE, warning=FALSE}
+resC5_mcp %>%
+  gather(sample, score, -cell_type) %>%
+  ggplot(aes(x=sample, y=score, color=cell_type)) +
+    geom_point(size=4) +
+    facet_wrap(~cell_type, scales="free_x", ncol=3) +
+    scale_color_brewer(palette="Paired", guide="none") +
+    coord_flip() +  # this is to create teh plot in horizontal, we have too many samples for that
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+Scatter plots for epic
+```{r scaterEpic ,message=FALSE, warning=FALSE}
+resC5_epic %>%
+  gather(sample, score, -cell_type) %>%
+  ggplot(aes(x=sample, y=score, color=cell_type)) +
+    geom_point(size=4) +
+    facet_wrap(~cell_type, scales="free_x", ncol=3) +
+    scale_color_brewer(palette="Paired", guide="none") +
+    coord_flip() +  # this is to create teh plot in horizontal, we have too many samples for that
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+
+
+
+
+
+
+
+########### The End
+```{r}
+sessionInfo()
+Sys.info()
+```

@@ -1,0 +1,262 @@
+---
+title: "DE analysis with edgeR and contrast"
+author: "Leticia"
+date: "02/08/2021"
+output: html_document
+---
+
+#######################################################################################################################################################################################
+#Load libraries
+```{r setup, include=FALSE}
+library(tidyverse)
+library(edgeR)
+library(limma)
+library(tidyr)
+library(dplyr)
+library(FactoMineR)
+library(ggplot2)
+library(gplots)
+library(marray)
+library(affy)
+library(CLL)
+library(Biobase)
+library(dendroextras)
+library(RColorBrewer)
+library(biomaRt)
+source("/path/diffexpr4.R")
+```
+
+# Set the workinf directory
+```{r  workingdirectory, warning=FALSE, message=FALSE}
+setwd("/path/DE_Analysis/")
+```
+
+#####################################################################################################################################################################
+We can use this script for DE analysis just right after the one for filter and normalization
+#For DE analysis we need to use Raw data
+#####################################################################################################################################################################
+#### Load data, counts and metadata for the cmb from cmbBase
+################################################################################
+```{r  loadData, warning=FALSE, message=FALSE}
+f.counts <- as.matrix(read.table( "/path/filter_raw.counts", sep = "\t", header = TRUE, row.names = 1, as.is=T))
+class(f.counts)
+dim(f.counts)
+Metadata
+ss <-read.csv("/path/metadata.csv", sep = ",")
+dim(ss)
+#sanitary check to be sure that columns in counts as same as row in ss
+identical(as.character(ss$sample), colnames(f.counts))
+```
+
+#############################################
+############################################# 
+#############################################
+# GLM and CONTRAST
+### We are using only one design, GLM with contrats
+##### contrast1 for the the comparisons which are the same but the other way around
+```{r model&contrast, message=FALSE, warning=FALSE}
+#rs <- paste(sstumor$Type, sstumor$N_Reads, sep = ".")
+#nreads <- factor(sstumor$N_Reads)
+
+#take and create teh models using the metadata column type
+rs <- factor(ss$Type )# levels = unique(rs))
+design <- model.matrix(~ 0 + rs ) #fitting an interaction model
+colnames(design) <- levels(rs)
+head(design)
+#second design in case we want to make other comparisons
+design2 <- model.matrix(~ 0 + ss$group ) #fitting an interaction model 
+colnames(design2) <- levels(ss$group)
+head(design2)
+
+#prepare the contrast== comparisons to make, usign the names in column type, this is an example
+contrast <- makeContrasts(Tm_Ctrl=Tumor-Nv, Crtl_Tm=Nv-Tumor, levels = design)
+
+#we can have more than one type of comparisons, we need also a 2nd design for that
+contrast2 <- makeContrasts(TPLL_Memory=TPLL-Memory, TPLL_EF=TPLL-EF, TPLL_Nv=TPLL-Naive, levels = design2)
+
+```
+## Creating DGEList elements, Normalization and Dispersion
+#Para hacer el exact text tengo que ponerle los grupos en incluirlo al crear la DEGList
+## Cuidado con el calculo del adispersion, varian los resultados, sobre todo pVal
+```{r DGElist, message=FALSE, warning=FALSE}
+#group <- sstumor$Type
+D <- DGEList(counts = as.matrix(cmb))
+Dnorm <- calcNormFactors( D )
+Dnorm$samples
+plotMDS(D)
+lin.norm.factors <- (sum(D$samples$lib.size)/nrow(D$samples))/ D$samples$lib.size
+lin.norm.factors
+##Calculating common and tagwise dispersion in one go, using the estimateDisp function that exploits the Cox-Reid profile-adjusted likelihood (CR) method in estimating dispersions with a specified design matrix
+Dt <- estimateDisp(Dnorm, design)
+#Dc <- estimateGLMCommonDisp( Dnorm, design) #Calculating common dispersion
+#Dt <- estimateGLMTagwiseDisp( Dc, design, prior.df=2 ) #Calculation Tagwise dispersion
+Dt.fit <- glmFit(Dt, design)
+plotBCV(Dt)
+Dt
+
+## This step is below for the contrast
+#Dt.lrt <- glmLRT(Dt.fit)
+```
+
+
+Now Using CONTRAST and GLM_LRT to create the table and save the data
+###########################################################################3
+Here we start to use the contrast/ comparisons that we prepare before with the model design, Type
+###### Contrats 1
+```{r contrast_tablecreate, message=FALSE, warning=FALSE}
+#table create using the name of the contrast
+Dt.lrt1 <- glmLRT(Dt.fit, contrast = contrast2[,"TPLL_EF"])
+topTags(Dt.lrt1)
+
+Dt.lrt.table1 <- topTags( Dt.lrt1, n=nrow(Dt$counts) )$table
+write.table(Dt.lrt.table1, file="name.txt", sep="\t")
+write.csv(Dt.lrt.table1, file="name.csv")
+```
+
+####### Data formatting
+```{r dataformatting, message=FALSE, warning=FALSE}
+#sorting by FDR
+sort_fdr <- sort(Dt.lrt.table1$FDR)<0.05
+pval <- topTags(Dt.lrt1, n=nrow(sort_fdr), adjust.method = "BH", sort.by = "PValue")$table
+dim(pval)
+#take only the significant (FDR)
+fdr_pass <- pval[(pval$FDR)<0.05,] # first cutt-off, FDR<0.05
+dim(fdr_pass)
+#from the significant take only the ones with logFC >1 (FC>2)
+lgfc_pass <- fdr_pass[which(abs(fdr_pass$logFC)>1),] # Second cutt-off, log2FC(abs=1) or FC(abs=2)
+lgfc_pass$FC <- 2^lgfc_pass$logFC
+dim(lgfc_pass)
+#save the data
+write.table(lgfc_pass, file="Significant_listgenes.txt", row.names = TRUE, col.names = NA, quote=FALSE, sep="\t")
+
+#Normalized counts
+tmm <- cpm(Dnorm, normalized.lib.sizes = TRUE)
+#tmm_gp <- cpmByGroup(y, group = NULL, dispersion = NULL, ...)
+#Nrpkm <- rpkm(Dnorm, gene.length = NULL, normalized.lib.sizes = NULL, log = FALSE )
+#Nrpkm_gp <-rpkmByGroup(y, group = NULL, gene.length = NULL, dispersion = NULL, ...)
+
+#we take the rows (significants genes) go to the Norm matrix and take the counts of the significant genes
+sign_tmm <- tmm[c(rownames(lgfc_pass)),]
+head(sign_tmm)  #####Careful is a Matrix
+dim(sign_tmm)
+sign_tmm <- as.data.frame(sign_tmm)
+#sign_tmm$mean_CD <- rowMeans(sign_tmm[,5:9])
+#sign_tmm$mean_TPLL <- rowMeans(sign_tmm[,35:55])
+head(sign_tmm)
+dim(sign_tmm)
+
+#save the counts of the significant genes 
+write.table(sign_tmm, file="Sign_cpm_.txt", row.names = TRUE, col.names = NA, quote=FALSE, sep="\t")
+sign_DE_tmm <- cbind(lgfc_pass, sign_tmm)
+dim(sign_DE_tmm)
+head(sign_DE_tmm)
+write.table(sign_DE_tmm, file="Significant_counts.txt", row.names = TRUE, col.names = NA, quote=FALSE, sep="\t")
+```
+
+
+################Curve for the Pvalues 
+```{r pvalCurve, message=FALSE, warning=FALSE}
+pdf("FDR_.pdf")
+plot(sort(Dt.lrt.table1$FDR))
+abline(c(0,1/nrow(Dt.lrt.table1)), col="blue")
+dev.off()
+```
+#####To make the Boxplots
+```{r boxplots, message=FALSE, warning=FALSE}
+number_of_plots <- 100
+top_genes <- row.names(Dt.lrt.table1)[1:number_of_plots]
+pdf("boxplots_.pdf")
+for (i in 1:length(top_genes))
+{
+ boxplot(as.numeric(log(cpm(Dnorm[which(rownames(Dnorm)==top_genes[i]), ])))~as.factor(ss_miR$Type), main=paste(top_genes[i],"FDR", Dt.lrt.table1$FDR[which(rownames(Dt.lrt.table1)==top_genes[i])], sep= " "))
+}
+dev.off()
+```
+
+#############################################################3 
+Next contrast/comparison that we prepare before with the model design, Type
+###### Contrats2  
+```{r contrast_tablecreate, message=FALSE, warning=FALSE}
+Dt.lrt2 <- glmLRT(Dt.fit, contrast = contrast2[,"TPLL_Nv"])
+topTags(Dt.lrt2)
+Dt.lrt.table2 <- topTags( Dt.lrt2, n=nrow(Dt$counts) )$table
+write.table(Dt.lrt.table2, file="name.txt", sep="\t")
+write.csv(Dt.lrt.table2, file="name.csv")
+```
+
+####### Data formatting
+```{r dataformatting, message=FALSE, warning=FALSE}
+sort_fdr <- sort(Dt.lrt.table2$FDR)<0.05
+pval <- topTags(Dt.lrt2, n=nrow(sort_fdr), adjust.method = "BH", sort.by = "PValue")$table
+dim(pval)
+fdr_pass <- pval[(pval$FDR)<0.05,] # first cutt-off, FDR<0.05
+dim(fdr_pass)
+lgfc_pass <- fdr_pass[which(abs(fdr_pass$logFC)>1),] # Second cutt-off, log2FC(abs=1) or FC(abs=2)
+lgfc_pass$FC <- 2^lgfc_pass$logFC
+dim(lgfc_pass)
+write.table(lgfc_pass, file="Significant_geneslist.txt", row.names = TRUE, col.names = NA, quote=FALSE, sep="\t")
+tmm <- cpm(Dnorm, normalized.lib.sizes = TRUE)
+#tmm_gp <- cpmByGroup(y, group = NULL, dispersion = NULL, ...)
+#Nrpkm <- rpkm(Dnorm, gene.length = NULL, normalized.lib.sizes = NULL, log = FALSE )
+#Nrpkm_gp <-rpkmByGroup(y, group = NULL, gene.length = NULL, dispersion = NULL, ...)
+sign_tmm <- tmm[c(rownames(lgfc_pass)),]
+head(sign_tmm)  #####Careful is a Matrix
+dim(sign_tmm)
+sign_tmm <- as.data.frame(sign_tmm)
+#sign_tmm$mean_CD <- rowMeans(sign_tmm[,5:9])
+#sign_tmm$mean_TPLL <- rowMeans(sign_tmm[,35:55])
+head(sign_tmm)
+dim(sign_tmm)
+write.table(sign_tmm, file="Sign_cpm_genescounts.txt", row.names = TRUE, col.names = NA, quote=FALSE, sep="\t")
+sign_DE_tmm <- cbind(lgfc_pass, sign_tmm)
+dim(sign_DE_tmm)
+head(sign_DE_tmm)
+write.table(sign_DE_tmm, file="Significant_genescounts.txt", row.names = TRUE, col.names = NA, quote=FALSE, sep="\t")
+```
+
+
+################Curve for the Pvalues 
+```{r pvalCurve, message=FALSE, warning=FALSE}
+pdf("FDR_.pdf")
+plot(sort(Dt.lrt.table2$FDR))
+abline(c(0,1/nrow(Dt.lrt.table2)), col="blue")
+dev.off()
+```
+#####To make the Boxplots, this part is t
+```{r boxplots, message=FALSE, warning=FALSE}
+number_of_plots <- 100
+top_genes <- row.names(Dt.lrt.table2)[1:number_of_plots]
+pdf("boxplots.pdf")
+for (i in 1:length(top_genes))
+{
+ boxplot(as.numeric(log(cpm(Dnorm[which(rownames(Dnorm)==top_genes[i]), ])))~as.factor(ss_miR$Type), main=paste(top_genes[i],"FDR", Dt.lrt.table2$FDR[which(rownames(Dt.lrt.table2)==top_genes[i])], sep= " "))
+}
+dev.off()
+```
+
+
+####
+And so on and so on, 
+We can add and create as much contrast as we want 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# System info
+```{r}
+sessionInfo()
+Sys.info()
+```

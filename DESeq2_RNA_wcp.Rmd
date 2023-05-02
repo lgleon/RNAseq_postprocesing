@@ -1,0 +1,835 @@
+---
+title: " RNAseq DE analysis using DESeq2"
+author: "Leticia"
+date: "05/08/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(gplots)
+library(edgeR)
+library(DESeq2)
+library(FactoMineR)
+library(biomaRt)
+library(Rsubread)
+library(Biobase)
+library(getopt)
+library(vsn) 
+library(BiocParallel)
+library(GenomicAlignments)
+library(GenomicFeatures)
+library(Rsamtools)
+library(pheatmap)
+library(RColorBrewer)
+library(PoiClaClu)
+library(genefilter)
+library(ggbeeswarm)
+library(apeglm)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+library(ReportingTools)
+library(Gviz)
+library(sva)
+library(RUVSeq)
+library(hexbin)
+source("/path/diffexpr4.R")
+```
+# Setting WD
+
+```{r workingdirectory, warning=FALSE, message=FALSE}
+setwd("/path/working_dir/")
+```
+
+### This code is, in the first part to check to make rlog (normalization/transformation) to check the data and make correlation and varible heatmaps and PCA, in the second part thre is the DE analysis using DESeq2, then some ploting (MA, dispersion, and list of significant DE genes) 
+##### Remeber, if you are usign Ensembl_ID the floating numbers must be removed
+```{r loaddata, warning=FALSE, message=FALSE}
+##### Remember the floating numbers in the Ensembl ids, only with exons
+Org_de<- read.delim("/path/filetercounts_lenght.txt", header = T, sep = "\t", as.is = T, row.names = 1)
+head(Org_de)
+ss_Org <- read.csv("/path/ss_norm_.csv",   sep = ";")
+head(ss_Org)
+
+identical(as.character(ss_Org$Patient.ID), colnames(Org_de[,-1])) # they looks the same !!!!!!!!!! They are the same, it is puntuation
+
+```
+```{r DESeq2Object, warning=FALSE, message=FALSE}
+ddsMat <- DESeqDataSetFromMatrix(countData = Org_de[,-1], 
+                                 colData = ss_Org,
+                                 design = ~ TypeLession )
+
+```
+
+Prefiltering, rows with very low counts will be removed (that is noise)
+This is a way to filter low counts, but I did it before, this is a "second, just in case" check point 
+```{r}
+nrow(ddsMat)
+keep <- rowSums(counts(ddsMat)) >= 10
+dds_keep <- ddsMat[keep,]
+#ddsMat <- ddsMat[rowSums(counts(ddsMat))>1,]
+nrow(dds_keep)
+```
+
+# what is rlog transfroamtion
+##############
+rlog transformation (regularized-logarithm transformation), for genes wiht high counts is kinda ordinary log2 transformation, for genes with low counts
+values are shrunken towards the genes' averages across all samples. All transforamtion using a empirical bayesian prior
+The result is a approximately a homokedastic data (variance of the observation (gene expression) does not depend of the mean)
+######################
+
+rlog or vst transformation or normalization,  
+Si guardamos este tipo de datos, o mas bien estos datos transformados, o normalizados se pueden usar para correlaciones, heatmaps or PCA, 
+Estos datos se guardan en la memoria de R como SummarizedExperiment class, in the assay slot, we ca save ir tho
+```{r}
+dds_rlog <- rlog(ddsMat, blind = T,   fitType = "mean") #blind is to make it completely unsupervised, no looking at the conditons or not 
+head(assay(dds_rlog)) #this is because the data is store at the assay slot (R)
+
+dds_vst <- vst(ddsMat, blind = F)  
+head(assay(dds_vst))
+```
+To show the effect of the transforamtion we use plots, for that we need to use samples, usially the 1 versus the second or one control versus one patient
+```{r}
+ddsMat <- estimateSizeFactors(ddsMat)
+
+df <- bind_rows(
+  as_data_frame(log2(counts(ddsMat, normalized=T)[,1:2]+1)) %>%
+    mutate(transformation="log2(x+1)"),
+  as_data_frame(assay(dds_vst)[, 1:2]) %>% dplyr::mutate(transformation = "vst"),
+  as_data_frame(assay(dds_rlog)[,1:2])%>% mutate(transformation="rlog"))
+
+colnames(df)[1:2] <- c("x", "y")
+
+ggplot(df, aes(x=x, y=y)) + 
+  geom_hex(bins = 80) +
+  coord_fixed() +
+  facet_grid(. ~ transformation)
+  
+
+```
+
+
+########################################################################################################################################################################################################################################################################################################################
+# Data  normalize checking, using different tols combined with the rlog(DESeq2) tools
+# Now we check the distances using the rlog matrix
+```{r distHeatmp, warning=FALSE, message=FALSE}
+sampleDists <- dist(t(assay(dds_rlog)))
+
+#sampleDist
+sampleDistMatrix <- as.matrix( sampleDists )
+rownames(sampleDistMatrix) <- paste( dds_rlog$Patient.ID, dds_rlog$TypeLession, sep = " - " )
+colnames(sampleDistMatrix) <- NULL
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows = sampleDists,
+         clustering_distance_cols = sampleDists,
+         col = colors)
+```
+To calculate and see as posion distrubuton
+
+```{r poisonHeatp, warning=FALSE, message=FALSE}
+poisd <- PoissonDistance(t(counts(ddsMat)))
+
+samplePoisDistMatrix <- as.matrix( poisd$dd )
+rownames(samplePoisDistMatrix) <- paste( ddsMat$Patient.ID, ddsMat$TypeLession, sep=" - " )
+colnames(samplePoisDistMatrix) <- NULL
+pheatmap(samplePoisDistMatrix,
+         clustering_distance_rows = poisd$dd,
+         clustering_distance_cols = poisd$dd,
+         col = colors)
+```
+
+#PCA
+```{r PCA, warning=FALSE, message=FALSE}
+plotPCA(dds_rlog, intgroup = c("TypeLession", "Grade_dysplasia"))
+
+
+# Using day and type column information for the PCAs
+pcaData <- plotPCA(dds_rlog, intgroup = c( "TypeLession", "Grade_dysplasia"), returnData = TRUE)  
+pcaData
+
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+
+ggplot(pcaData, aes(x = PC1, y = PC2, color = TypeLession, shape = Grade_dysplasia)) +
+  geom_point(size =3) +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  coord_fixed()
+
+## Here with day and group the PCAs
+pcaDatag <- plotPCA(dds_rlog, intgroup = c( "Grade_dysplasia", "TypeLession"), returnData = TRUE)
+pcaDatag
+
+percentVar <- round(100 * attr(pcaData, "percentVar")) # Is giving how much this Variab contribute in the PCA in 100% 
+
+ggplot(pcaDatag, aes(x = PC1, y = PC2, color = Grade_dysplasia, shape = TypeLession)) +
+  geom_point(size =3) +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +  # How is going to appear in the plot
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  coord_fixed()
+
+
+```
+
+
+# Some heatmap with gene clustering, and using genefiltering
+```{r topVarGenes, fig.width=9, fig.height=7, dpi=300}
+topVarGenes10 <- head(order(rowVars(assay(dds_rlog)), decreasing = T), 10)
+topVarGenes15 <- head(order(rowVars(assay(dds_rlog)), decreasing = T), 15)
+topVarGenes20 <- head(order(rowVars(assay(dds_rlog)), decreasing = T), 20)
+topVarGenes30 <- head(order(rowVars(assay(dds_rlog)), decreasing = T), 30)
+#pdf("topVargenes.pdf")
+par(mfrow=c(2,2))
+heatmap.2(assay(dds_rlog)[topVarGenes10,], scale="row", trace="none", dendogram="colum", margins = c(10, 10), col= colorRampPalette(rev(brewer.pal(9,"RdBu"))) (255) )
+heatmap.2(assay(dds_rlog)[topVarGenes15,], scale="row", trace="none", dendogram="colum", margins = c(10, 10), col= colorRampPalette(rev(brewer.pal(9,"RdBu"))) (255) )
+heatmap.2(assay(dds_rlog)[topVarGenes20,], scale="row", trace="none", dendogram="colum", margins = c(10, 10), col= colorRampPalette(rev(brewer.pal(9,"RdBu"))) (255) )
+heatmap.2(assay(dds_rlog)[topVarGenes30,], scale="row", trace="none", dendogram="colum", margins = c(10, 10), col= colorRampPalette(rev(brewer.pal(9,"RdBu"))) (255) )
+#dev.off()
+```
+
+###
+# MDS plots, similar to PCA, bit different, using also rlog data
+###
+rlog
+```{r mdsPlot, warning=FALSE, message=FALSE}
+mds <- as.data.frame(colData(dds_rlog))  %>%
+         cbind(cmdscale(sampleDistMatrix))
+ggplot(mds, aes(x = `1`, y = `2`, color = TypeLession, shape = Grade_dysplasia)) +
+  geom_point(size = 3) + coord_fixed()
+```
+TypeLession, shape = Grade_dysplasia
+# Run after dds (Deseq)
+
+
+
+
+# Finish the data checking
+########################################################################################################################################################################################################################################################################################################################
+
+Now Differential expression analsysi with DESeq2, with and without contrast
+For the differential testing is better not to make any trasformation, we use the data as raw because during the process it will be a normalization
+```{r DDSeq, warning=FALSE, message=FALSE}
+#this is the real step were the DE is done, fit to the model and make the statistical process
+dds <- DESeq(ddsMat, fitType = "mean")
+```
+Poison data transformation, it fit better that the normal one, similar as the Heatmap
+```{r mdsPoison, warning=FALSE, message=FALSE}
+mdsPois <- as.data.frame(colData(dds)) %>%
+   cbind(cmdscale(samplePoisDistMatrix))
+ggplot(mdsPois, aes(x = `1`, y = `2`, color = TypeLession, shape = Grade_dysplasia)) +
+  geom_point(size = 3) + coord_fixed()
+```
+
+
+
+
+Once me made the DE in the pre-previous step we can check the results 
+results table construction
+#### using directly like that we only get the list of the DE, but in alfabetical order (genes), not by pval
+```{r results, message=FALSE, warning=FALSE}
+res <- results(dds) # this is how we save the results that we generate in an independent dataframe
+res
+mcols(res, use.names = T)
+summary(res) #quite usefull for the up, down and other details of the results
+
+res0.5 <- results(dds, alpha = 0.05) # save in a var the results with a pval lover that 0.05, then we can use another selection criteria, adj pval 
+table(res0.5$padj < 0.05)
+table(abs(res0.5$log2FoldChange)>1) 
+resLFC1 <- results(dds, lfcThreshold=1) #same but results with lfc above 1 (fc>2), then in the next step a 2nd step selection using adj pval below 0.05
+table(resLFC1$padj < 0.05)
+```
+
+How to make the DE using contrast and the column or variable that you want to use, example: group or type column for this case
+```{r results_contrast, message=FALSE, warning=FALSE}
+res <- results(dds, contrast = c("TypeLession", "Normal", "Adenoma"))
+#res_nv
+mcols(res, use.names = T) # info about the columns in the results, type os statistics etc 
+```
+##### Multiple testing
+```{r mtesting, message=FALSE, warning=FALSE}
+sum(res$pvalue <0.05, na.rm = T)
+
+sum((!is.na(res$pvalue)))
+
+sum(res$padj < 0.05, na.rm=TRUE)
+```
+
+####### Subset the result table to these genes and then sort them in by the log2FC estimate to get the significant genes with the strongest down-regulation: 
+```{r results_filterpval, message=FALSE, warning=FALSE}
+resSig <- subset(res, padj < 0.05)
+head(resSig[ order(resSig$log2FoldChange), ])
+```
+…and with the strongest up-regulation: (log2FC positive)
+```{r results_log2FC, message=FALSE, warning=FALSE}
+head(resSig[ order(resSig$log2FoldChange, decreasing = TRUE), ])
+```
+
+
+
+############################################################################################################################################
+Saving tables resutls with the Significant DE gens, also adding the rpkm, fpkm and tpm
+############################################################################################################################################
+
+Save table results to csv files, result, sign result, merge with normcounts (rlog, also with rpkm, fpkm and tpm), for gsea porpouse and comparison use
+```{r savingTables_DEgenes, message=FALSE, warning=FALSE}
+# remove any NA which could be in the data results 
+res <- na.omit(res)
+
+#take the results and order then according adjpval
+de_results <-  res[order(res$padj),]
+head(de_results)
+write.csv(de_results, "DE_list.csv")
+
+#####
+#selecting the ones with adjpoval less than 0.05
+#de_sigresu <- results(dds, alpha = 0.05) # It is not selecting and keeping only those one below 0.05
+de_sigresu2 <- de_results[(de_results$padj)<0.05,]
+dim(de_sigresu2)
+
+# from the previous selection, we select the ones wich are FC(abs>2) or Lg2FC(abs(>1))
+de_pval_fc <- de_sigresu2[abs(de_sigresu2$log2FoldChange)>1,]
+dim(de_pval_fc)
+
+#Save as csv the significant filter data (adjpval and log2FC), directly save as csv, not creating any variable, those only DE results (NO counts here)
+write.csv(as.data.frame(de_sigresu2[abs(de_sigresu2$log2FoldChange)>1,]), file="signf_fc_genelist.csv")
+
+
+
+
+# Now with these two filters as thersholds we merge the normalizes (rlog) count matrix to the resutls
+#We take and save in a variable the normalize rlog data counts
+norm <- assay(dds_rlog)
+norm <- as.data.frame(norm)
+##################################  The other normalized matrix
+#tpm_lgl <- read.delim("/media/immunology/Data/Tom_Group/Jorn_RNAseq_LGL/Norm/tpm_Eids_puro.txt", header = T, sep = "\t", as.is = T, row.names = 1)
+#fpkm_lgl <- read.delim("/media/immunology/Data/Tom_Group/Jorn_RNAseq_LGL/Norm/fpkm_Eids_puro.counts", header = T, sep = "\t", as.is = T, row.names = 1)
+#rpkm_lgl <- read.delim("/media/immunology/Data/Tom_Group/Jorn_RNAseq_LGL/Norm/rpkm_Eid_puro.txt", header = T, sep = "\t", as.is = T, row.names = 1)
+
+
+
+
+
+# Here select from the norm counts only those genes which apear as signifcant and fc 
+sign_fc <-norm[c(rownames(de_pval_fc)),]
+dim(sign_fc)
+head(sign_fc)
+#For those ones which are mainly for gsea 
+#sign_fc_t <- tpm_lgl[c(rownames(de_pval_fc)),]
+#sign_fc_f <- fpkm_lgl[c(rownames(de_pval_fc)),]
+#sign_fc_r <-rpkm_lgl[c(rownames(de_pval_fc)),]
+
+# merge the tow data frame, coutns and de results
+sign_DE <- cbind(de_pval_fc, sign_fc)
+dim(sign_DE)
+head(sign_DE)
+#sign_DE_r <- cbind(de_pval_fc, sign_fc_r)
+#sign_DE_t <- cbind(de_pval_fc, sign_fc_t)
+#sign_DE_f <- cbind(de_pval_fc, sign_fc_f)
+
+
+# Now save the csv completed, NO symbol names yet ! (for RNAs)
+
+write.csv(sign_DE, "Significant_genelist_rlog.csv")
+#write.csv(sign_DE_r, "Significant_LGL-CD8_rpkm.csv")
+#write.csv(sign_DE_t, "Significant_LGL-CD8_fpkm.csv")
+#write.csv(sign_DE_f, "Significant_LGL-CD8_tpm.csv")
+
+```
+## For the GSEA Formating, its continuous after adding the Gene symbols column
+
+
+##############################################################################3
+Plotting results
+#############################################################################
+
+Counts Plots, Those like the boxplots I use to do it
+In this case I am only plotting the big comparison
+Normalized count for a gene, only plotting one gene, if we want more I need to as in the MAplots, create tables with the results
+```{r plotCounts, message=FALSE, warning=FALSE}
+topGene <- rownames(res)[which.min(res$padj)]
+plotCounts(dds, gene = topGene, intgroup=c("TypeLession"))
+
+```
+
+This is almost the same type of Figure, but we are using colors 
+```{r plotCountscolor, message=FALSE, warning=FALSE}
+geneCounts <- plotCounts(dds, gene = topGene, intgroup = c("TypeLession","Grade_dysplasia"),
+                         returnData = TRUE)
+ggplot(geneCounts, aes(x = TypeLession, y = count, color = Grade_dysplasia)) +
+  scale_y_log10() +  geom_beeswarm(cex = 3)
+```
+
+Normalized counts with connecting lines
+It is not giving much information, this is only good with time points, or using group info
+```{r linesConnect, message=FALSE, warning=FALSE}
+ggplot(geneCounts, aes(x = TypeLession, y = count, color = TypeLession, group = Grade_dysplasia)) +
+  scale_y_log10() + geom_point(size = 3) + geom_line()
+```
+
+Ma-Plots
+```{r MAplot, message=FALSE, warning=FALSE}
+resultsNames(dds)
+```
+
+Plot dispersion estimation
+```{r plotDisp, message=FALSE, warning=FALSE}
+plotDispEsts(dds)
+pdf("dispersionEstim.pdf")
+plotDispEsts(dds)
+dev.off()
+```
+
+
+As coefficient we use tge comparison that we did for this case
+```{r lfcShrink, message=FALSE, warning=FALSE}
+res <- lfcShrink(dds, coef="TypeLession_Normal_vs_Adenoma", type="apeglm")
+plotMA(res, ylim = c(-5, 5))
+
+```
+```{r plotMA, message=FALSE, warning=FALSE}
+res.noshr <- results(dds, name="TypeLession_Progr_adenoma_vs_Adenoma")
+plotMA(res.noshr, ylim = c(-5, 5))
+```
+
+Per gene
+More than 5 genes are not easy to see clear.
+In this case I am using the table created from teh results, adjpval / lg2FC filter list
+```{r PerGene_boxplot, message=FALSE, warning=FALSE}
+number_top <- 5  # select 5 genes in both cases
+
+res_table <- as.data.frame(sign_fc)
+#top_genes <- row.names(res)[which(res$padj)][1:number_top]
+top_genes <- row.names(res_table)[1:number_top]
+pdf("top_RNAs.pdf")
+plotMA(res, ylim = c(-5,5))
+#topGene <- rownames(res)[which.min(res$padj)]
+with(res[top_genes, ], {
+  points(baseMean, log2FoldChange, col="dodgerblue", cex=2, lwd=2)
+  text(baseMean, log2FoldChange, top_genes, pos=2, col="dodgerblue")
+})
+
+dev.off()
+
+number_of_plots <- 100
+top_genes <- row.names(res_table)[1:number_of_plots]
+pdf("boxplots_100topgenes.pdf")
+for (i in 1:length(top_genes))
+{
+ boxplot(as.numeric(assay(dds_rlog[which(rownames(dds_rlog)==top_genes[i]), ])) ~ as.factor(ss_Org$TypeLession), main=paste(top_genes[i],"padj", res_table$padj[which(rownames(res_table)==top_genes[i])], sep= " ", ylab="Normalized rlog counts", xlab="cell type" ))
+}
+dev.off()
+
+```
+
+# Checking point
+# Histogram for pVal
+Histogram of p values for genes with mean normalized count larger than 1.
+```{r pval_histogram, message=FALSE, warning=FALSE}
+hist(res$pvalue[res$baseMean > 1], breaks = 0:20/20,
+     col = "grey50", border = "white")
+```
+
+# Gene Clustering 
+Using geneFilter library
+```{r topVarGenes, message=FALSE, warning=FALSE}
+topVarGenes <- head(order(rowVars(assay(dds_rlog)), decreasing = TRUE), 20)
+topVarGenes30 <- head(order(rowVars(assay(dds_rlog)), decreasing = TRUE), 30)
+topVarGenes50 <- head(order(rowVars(assay(dds_rlog)), decreasing = TRUE), 50)
+```
+
+```{r plot_topVargenes, message=FALSE, warning=FALSE}
+mat  <- assay(dds_rlog)[ topVarGenes, ]
+mat  <- mat - rowMeans(mat)
+anno <- as.data.frame(colData(dds_rlog)[, c("Grade_dysplasia","TypeLession")])
+pheatmap(mat, annotation_col = anno)
+
+mat  <- assay(dds_rlog)[ topVarGenes30, ]
+mat  <- mat - rowMeans(mat)
+anno <- as.data.frame(colData(dds_rlog)[, c("Grade_dysplasia","TypeLession")])
+pheatmap(mat, annotation_col = anno)
+
+mat  <- assay(dds_rlog)[ topVarGenes50, ]
+mat  <- mat - rowMeans(mat)
+anno <- as.data.frame(colData(dds_rlog)[, c("Grade_dysplasia","TypeLession")])
+pheatmap(mat, annotation_col = anno)
+```
+
+#####################################
+#### Independent Filtering 
+ 
+```{r indp_filter,  message=FALSE, warning=FALSE}
+qs <- c(0, quantile(resLFC1$baseMean[resLFC1$baseMean > 0], 0:6/6))
+bins <- cut(resLFC1$baseMean, qs)
+levels(bins) <- paste0("~", round(signif((qs[-1] + qs[-length(qs)])/2, 2)))
+fractionSig <- tapply(resLFC1$pvalue, bins, function(p)
+                          mean(p < .05, na.rm = TRUE))
+barplot(fractionSig, xlab = "mean normalized count",
+                     ylab = "fraction of small p values")
+```
+ The ratio of small p values for genes binned by mean normalized count. The p values are from a test of log2 fold change greater than 1 or less than -1. This plot demonstrates that genes with very low mean count have little or no power, and are best excluded from testing.
+
+
+################################################################
+Gene Name Annotation and exploring results
+################################################################
+
+```{r e_id2geneNames, message=FALSE, warning=FALSE}
+columns(org.Hs.eg.db)  # Human
+#columns(org.Mm.eg.db)  # Mouse
+```
+
+
+##### This part is for RNAseq data
+#```{r}
+#with rlog
+sign_DE$symbol <- mapIds(org.Hs.eg.db,
+                    keys=row.names(sign_DE),
+                     column="SYMBOL",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+#with the other normlized matrix 
+#sign_DE_r$symbol <- mapIds(org.Mm.eg.db,
+#                   keys=row.names(sign_DE_r),
+#                     column="SYMBOL",
+#                     keytype="ENSEMBL",
+#                    multiVals="first")
+#sign_DE_f$symbol <- mapIds(org.Mm.eg.db,
+#                    keys=row.names(sign_DE_f),
+#                     column="SYMBOL",
+#                     keytype="ENSEMBL",
+#                     multiVals="first")
+#sign_DE_t$symbol <- mapIds(org.Mm.eg.db,
+#                    keys=row.names(sign_DE_t),
+#                     column="SYMBOL",
+#                     keytype="ENSEMBL",
+#                     multiVals="first")
+
+#sign_DE$entrez <- mapIds(org.Hs.eg.db,
+#                    keys=row.names(sign_DE),
+#                     column="ENTREZID",
+#                     keytype="ENSEMBL",
+#                     multiVals="first")
+#```
+
+### I need to save the data again after add the column with the gene names (symbols)
+```{r saveGeneNames, message=FALSE, warning=FALSE}
+write.csv(sign_DE, "Significant__rlog_Gns.csv")
+#write.csv(sign_DE_r, "Significant_LGL-CD8_Gns_rpkm.csv")
+#write.csv(sign_DE_t, "Significant_LGL-CD8_Gns_fpkm.csv")
+#write.csv(sign_DE_f, "Significant_LGL-CD8_Gns_tpm.csv")
+```
+##############################################################################3
+End gene name annotation
+#############################################################################
+
+
+
+##############################################################################3
+GSEA formating 
+#############################################################################
+
+## For teh GSEA formating, since we just need the counts (Norm) which are significant, we directly retrive the significant Norm matices (sign_fc_t, r and f)
+#### Those are in chunk savingTables, lines 333-335
+
+### Before add the symbols or gene names, we reduce the number of decimals in the columns
+Doiing this step here I don´t need to remover any column or change anything
+#```{r}
+gsea_fmt_t <-round(sign_fc_t, digits = 2)
+gsea_fmt_f <-round(sign_fc_f, digits = 2)
+gsea_fmt_r <-round(sign_fc_r, digits = 2)
+
+#head(gsea_format)
+#```
+
+Those matrices have NO gene symbols
+### Put symbols as UPPercase, in general I need this to run GSEA, but check symbols names in the gene set that we are using
+#```{r}
+gsea_fmt_f$symbol <- toupper(gsea_fmt_f$symbol)
+gsea_fmt_r$symbol <- toupper(gsea_fmt_t$symbol)
+gsea_fmt_t$symbol <- toupper(gsea_fmt_t$symbol)
+
+#```
+
+#### Put symbols as rownames for the gsea
+##### Could be problematic because there could be duplicate gene names, unfortunately not that uncommon
+I will try that part outside R for the moment, I need to check this
+#```{r}
+gsea_fmt_f <- na.omit(gsea_fmt_f)
+gsea_fmt_r <- na.omit(gsea_fmt_t)
+gsea_fmt_t <- na.omit(gsea_fmt_t)
+
+#```
+
+### Remove the symbols column at the end to keep only the rownames
+No need since we only have the E_ids
+#```{r}
+gsea_fmt_f <- gsea_fmt_f[,-17]
+gsea_fmt_r <- gsea_fmt_r[,-17]
+gsea_fmt_t <- gsea_fmt_t[,-17]
+#```
+
+### Save the tables for GSEA Analysis
+#### Those tables have: 6 column with DE results (LFC, pval, adpval) and Normalized (rpkm, fpkm, tpm) counts for each sample (those are the important ones for GSEA)
+#### For GSEA we need to keep only the Norm counts columns
+#```{r}
+write.table(gsea_fmt_r, "/path/gsea_lglRNA_rpkm.txt", row.names = TRUE, col.names = NA, quote=FALSE, sep="\t")
+write.table(gsea_fmt_f, "/path/gsea_lglRNA_fpkm.txt", row.names = TRUE, col.names = NA, quote=FALSE, sep="\t")
+write.table(gsea_fmt_t, "/path/gsea_lglRNA_tpm.txt", row.names = TRUE, col.names = NA, quote=FALSE, sep="\t")
+#```
+
+##############################################################################3
+                  End GSEA 
+#############################################################################
+
+
+
+
+
+################################################
+#### Exporting results
+################################################
+
+```{r checkresults, message=FALSE, warning=FALSE}
+resultsNames(dds)
+```
+
+Now the results have the desired external gene IDs:
+```{r reOrder, message=FALSE, warning=FALSE}
+resOrdered <- sign_DE[order(sign_DE$pvalue),]
+head(resOrdered)
+
+```
+
+```{r saveReOrder, message=FALSE, warning=FALSE}
+resOrderedDF <- as.data.frame(resOrdered)[1:150, ]
+write.csv(resOrderedDF, file = "results_NvsAde")
+
+```
+
+Lib ReportingTools os not working, no clue why, it happens when I upgrade to R3.5
+#```{r}
+#library("ReportingTools")
+htmlRep <- HTMLReport(shortName="report", title="My report",
+                      reportDirectory="./report")
+publish(resOrderedDF, htmlRep)
+url <- finish(htmlRep)
+browseURL(url)
+#```
+Super cool html with the results
+
+################################################
+Plotting fold change in genomic space (lib not working well)
+################################################
+usually is format=GRanges
+```{r plotFC, message=FALSE, warning=FALSE}
+resGR <- results(dds, name="TypeLession_Normal_vs_Adenoma", format="DataFrame")
+#resGR$log2FoldChange <- sign_DE$log2FoldChange # this is not working because here we only have the significant one, shorter list that the res complete
+#Error 7201 elements in value to replace 21416 elements
+resGR$log2FoldChange <- res$log2FoldChange
+resGR
+
+```
+Adding to resGR the gene symbols name column
+#```{r}
+resGR$symbol <- mapIds(org.Hs.eg.db,
+                    keys=row.names(resGR),
+                     column="SYMBOL",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+#```
+
+This is annother way to transfor EMSEMBL ids to SYMBOLS (gene names)
+#```{r}
+resGR$symbol2 <- mapIds(org.Hs.eg.db, rownames(resGR), "SYMBOL", "ENSEMBL") #Problem with ensembl 
+#```
+
+
+We will use the Gviz package for plotting the GRanges and associated metadata
+
+#```{r}
+window <- resGR[topGene] + 1e6
+strand(window) <- "*"
+resGRsub <- resGR[resGR %over% window]
+naOrDup <- is.na(resGRsub$symbol) | duplicated(resGRsub$symbol)
+resGRsub$group <- ifelse(naOrDup, names(resGRsub), resGRsub$symbol)
+#```
+
+We create a vector specifying if the genes in this subset had a low value of padj.
+#```{r}
+#status <- factor(ifelse(resGRsub$padj < 0.1 & !is.na(resGRsub$padj), "sig", "notsig"))
+#```
+
+
+#```{r}
+#options(ucscChromosomeNames = FALSE)
+#g <- GenomeAxisTrack()
+#a <- AnnotationTrack(resGRsub, name = "gene ranges", feature = status)
+#d <- DataTrack(resGRsub, data = "log2FoldChange", baseline = 0,
+#               type = "h", name = "log2 fold change", strand = "+")
+#plotTracks(list(g, d, a), groupAnnotation = "group",
+#           notsig = "grey", sig = "hotpink")
+#```
+
+
+
+
+################################################
+###Removing hidden batch effets with libraries sva and RUVSeq
+################################################
+using here library SVA
+```{r sva1, message=FALSE, warning=FALSE}
+dat  <- counts(dds, normalized = TRUE)
+idx  <- rowMeans(dat) > 1
+dat  <- dat[idx, ]
+mod  <- model.matrix(~ TypeLession, colData(dds))
+mod0 <- model.matrix(~   1, colData(dds))
+svseq <- svaseq(dat, mod, mod0, n.sv = 2)
+
+```
+
+```{r sva2, message=FALSE, warning=FALSE}
+svseq$sv
+```
+
+Because we actually do know the cell lines, we can see how well the SVA method did at recovering these variables (figure below).
+```{r sva3, message=FALSE, warning=FALSE}
+par(mfrow = c(2, 1), mar = c(3,5,3,1))
+for (i in 1:2) {
+  stripchart(svseq$sv[, i] ~ dds$TypeLession, vertical = TRUE, main = paste0("SV", i))
+  abline(h = 0)
+}
+
+```
+
+Finally, in order to use SVA to remove any effect on the counts from our surrogate variables, we simply add these two surrogate variables as columns to the DESeqDataSet and then add them to the design:
+```{r sva4, message=FALSE, warning=FALSE}
+ddssva <- dds
+ddssva$SV1 <- svseq$sv[,1]
+ddssva$SV2 <- svseq$sv[,2]
+design(ddssva) <- ~ SV1 + SV2 + TypeLession
+
+```
+We could then produce results controlling for surrogate variables by running DESeq with the new design.
+
+
+ Now using RUVSeq
+Like before, matrix with norm counts
+```{r RUVSeq1, message=FALSE, warning=FALSE}
+set <- newSeqExpressionSet(counts(dds))
+idx  <- rowSums(counts(set) > 5) >= 2
+set  <- set[idx, ]
+set <- betweenLaneNormalization(set, which="upper")
+not.sig <- rownames(res)[which(res$pvalue > .1)]
+empirical <- rownames(set)[ rownames(set) %in% not.sig ]
+set <- RUVg(set, empirical, k=2)
+pData(set)
+
+```
+
+Plotting
+We can plot the factors estimated by RUV:
+```{r RUVSeq2, message=FALSE, warning=FALSE}
+par(mfrow = c(2, 1), mar = c(3,5,3,1))
+for (i in 1:2) {
+  stripchart(pData(set)[, i] ~ dds$TypeLession, vertical = TRUE, main = paste0("W", i))
+  abline(h = 0)
+}
+
+```
+
+
+Create the new design to run DESeq again 
+```{r RUVSeq3, message=FALSE, warning=FALSE}
+ddsruv <- dds
+ddsruv$W1 <- set$W_1
+ddsruv$W2 <- set$W_2
+design(ddsruv) <- ~ W1 + W2 + TypeLession
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Another way of annotation, use the one that works better for each set of data (usually the previous one), with miR is directly symbols name
+
+## Adding in this chunck the gene names to the list of results that we obtain and then we add to the data frame of the significant genes 
+#```{r}
+#create teh list of Ensembl ids to translate from the results (only significant ones)
+res_2_Ensembl_v90 <- rownames (sign_DE_2)
+res_5_Ensembl_v90 <- rownames (sign_DE_5)
+res_6_Ensembl_v90 <- rownames (sign_DE_6)
+
+#to create the biomaRT query:
+##################################### From archive
+res2_BMgenes <- getBM(attributes = c("ensembl_gene_id", "external_gene_name"), filters = "ensembl_gene_id", values = res_2_Ensembl_v90, mart = ensembl90)
+dim(res2_BMgenes)
+head (res2_BMgenes)
+
+res5_BMgenes <- getBM(attributes = c("ensembl_gene_id", "external_gene_name"), filters = "ensembl_gene_id", values = res_5_Ensembl_v90, mart = ensembl90)
+dim(res5_BMgenes)
+head (res5_BMgenes)
+
+res6_BMgenes <- getBM(attributes = c("ensembl_gene_id", "external_gene_name"), filters = "ensembl_gene_id", values = res_6_Ensembl_v90, mart = ensembl90)
+dim(res6_BMgenes)
+head (res6_BMgenes)
+
+
+
+# Convert the gene ID colum into row names as create a data frame to merge after
+BMgenesRowsEIDs_2 <- data.frame (res2_BMgenes[, -1], row.names=res2_BMgenes[,1])
+head(BMgenesRowsEIDs_2)
+colnames (BMgenesRowsEIDs_2) <- "GeneName"
+dim(BMgenesRowsEIDs_2)
+head (BMgenesRowsEIDs_2)
+
+BMgenesRowsEIDs_5 <- data.frame (res5_BMgenes[, -1], row.names=res5_BMgenes[,1])
+head(BMgenesRowsEIDs_5)
+colnames (BMgenesRowsEIDs_5) <- "GeneName"
+dim(BMgenesRowsEIDs_5)
+head (BMgenesRowsEIDs_5)
+
+BMgenesRowsEIDs_6 <- data.frame (res6_BMgenes[, -1], row.names=res6_BMgenes[,1])
+head(BMgenesRowsEIDs_6)
+colnames (BMgenesRowsEIDs_6) <- "GeneName"
+dim(BMgenesRowsEIDs_6)
+head (BMgenesRowsEIDs_6)
+
+#Check
+is.data.frame (BMgenesRowsEIDs_2)
+is.data.frame (BMgenesRowsEIDs_5)
+is.data.frame (BMgenesRowsEIDs_6)
+
+
+#```
+
+
+
+
+
+
+
+
+
+
+
+# System info
+```{r}
+sessionInfo()
+Sys.info()
+```

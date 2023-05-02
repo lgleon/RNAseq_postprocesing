@@ -1,0 +1,388 @@
+---
+title: "CMS classifier and CMScaller test"
+author: "Leticia G Leon"
+date: "7/7/2021"
+output: html_document
+---
+############################################################################################################################
+#############################################################################################################################
+CMSclassifer and CMScaller
+This script is to run this two test
+#############################################################################################################################
+#############################################################################################################################
+Install libraries
+```{r setup, include=FALSE}
+library(devtools)
+#install_github("Sage-Bionetworks/CMSclassifier")
+#install_github("ebecht/MCPcounter",ref="master", subdir="Source")
+#install.packages("synapser", repos = c("http://ran.synapse.org", "http://cran.fhcrc.org"))
+
+```
+Load Libraries
+```{r libraries, warning=FALSE, message=FALSE}
+#library(synapser)
+library(CMSclassifier)
+library(MCPcounter)
+library(DESeq2)
+library(org.Hs.eg.db)
+```
+
+For CMSclassifier I need the previously normalized data, and it is recommended to use mainly rlog, we also can use rpkm
+We can use DESeq2 for that (rlog).
+We can load the raw counts, the wcp file in the count folder
+#############################################################################################################################
+The script is divided in three parts
+
+1
+In the first part we load the counts and make filtering for the noise (remove low counts), or load the filter counts directly, and 
+then use DESeq2 to calculate rlog transformation and EdgeR for rpkm Normalization
+
+
+2
+In the second part we annotate the normalized matrix to add the EntrezIDs (those are the IDs needed by CMSclasifier and caller)
+for been able to use the classifiers 
+
+3
+Run the classifiers 
+#############################################################################################################################
+
+#############################################################################################################################                1               Not Norm Matrix                                                 ######
+#######################################################################################################################
+
+I need to filter(I load the filter matrix, no need for that) and normalized the counts with/from the gene names counts matrix
+
+Tengo que empezar de los datos filtrados, me es mucho mas sencillo, tengo que cambiar todo este codigo, modificarlo por el de ngs
+```{r loadData, warning=FALSE, message=FALSE}
+#start with Gene Names, filter expression matrix with length column coming from featureCounts
+c5 <- read.delim("/Users/path to/rna_filter_lenght.counts", header = T, sep = "\t", as.is = T, row.names = 1)
+head(c5)
+#load metadata for run DESeq2 rlog transformation
+ssC5 <- read.csv("/Users/path to/metadata.csv", sep = ";")
+head(ssC5)
+```
+
+################################################################################################################################################################################################################################################
+Annotation for the Not Normalized matrix to be use in the CMScaller
+the caller works well with the hugo symbols but the CMSgsea needs the entrez Ids
+```{r Annotation, message=FALSE, warning=FALSE}
+columns(org.Hs.eg.db)  # Human
+```
+We add the entrez-ids here as an extra column, at the end
+```{r addEntrzId, message=FALSE, warning=FALSE}
+c5_entrz <- c5
+#use symbols for gene names
+c5_entrz$entrzid <- mapIds(org.Hs.eg.db,
+                    keys=row.names(c5),
+                     column="ENTREZID",
+                     keytype="SYMBOL",
+                     multiVals="first")
+#with the other normlized matrix 
+head(c5_entrz)
+#there are several genes that we did not get the Entrez ids, so next step is remove the NAs
+dim(c5_entrz)
+# reomover the na rows
+c5_entrz_clean <- na.omit(c5_entrz)
+#how much it is reduced
+dim(c5_entrz_clean)
+class(c5_entrz_clean)
+```
+put the entrez ids as row names
+We have a problem when we do that, R is adding an X at the beggining of the entrez-id number
+```{r rowsEntrezId, message=FALSE, warning=FALSE}
+#row.names(cgfcounts) <- make.names(cgfcounts$external_gene_id, unique=T)
+#row.names(c5dt_clean) <- make.names(c5dt_clean$entrzid, unique = T)
+row.names(c5_entrz_clean) <- c5_entrz_clean$entrzid  #there is not repetitions in the rownames (No X)
+head(c5_entrz_clean)[,1:2]
+dim(c5_entrz_clean)
+```
+remove entrez column and make it matrix again, I need a dataframe for CMSceller
+## This is the one which goest to the CMScaller, CMSgsea
+```{r saveEntrezId, message=FALSE, warning=FALSE}
+c5_etznotNorm <-as.matrix(c5_entrz_clean[,-c(1,70)]) #removing the last column with the entrez ids repeated
+#write.csv(c5_entrz_clean, "/Users/ path to /entrezID_NotNorm.csv", sep=",", row.names=T, col.names=T, quote=F)
+#write.table(c5_entrz_clean, "/Users/ path to /entrezID_NorNorm.txt", sep="\t", row.names=T, col.names=T, quote=F)
+```
+################################################################################################################################################################################################################################################
+NORMALIZATION
+Creating the DESeq2 object, link with counts and metadata
+```{r DEseqobject, warning=FALSE, message=FALSE}
+
+#filter matrix, also removing the Length column
+ddsMatC5 <- DESeqDataSetFromMatrix(countData = c5[,-1], 
+                                 colData = ssC5,
+                                 design = ~ status )
+
+```
+
+Using the filtered matrix 21000 genes
+```{r rlog, warning=FALSE, message=FALSE}
+dds_rlogC5 <- rlog(ddsMatC5, blind = T,   fitType = "mean") #blind is to make it completely unsupervised, no looking at the conditons or not 
+#head(assay(dds_rlog)) #this is because the data is store at the assay slot (R)
+```
+
+save a copy as tsv and 
+save in a variable to keep working more easily
+
+```{r saverlog, warning=FALSE, message=FALSE}
+c5_rlog <- assay(dds_rlogC5)
+#write.table(c5_rlog,"/Users/path to/rlog_geneName.txt", sep = "/t")
+class(c5_rlog) #it is a matrix
+#dim ( 21350    68)
+```
+calculate rpkm, WITH the filtered data set
+dim(21350    68)
+```{r rpkm, warning=FALSE, message=FALSE}
+#calculate rpkm 
+c5rpkm <- edgeR::rpkm(c5[,-1], c5$Length)
+class(c5rpkm) #it is a matrix
+#save the rpkm Norml data
+#write.csv(c5rpkm, "/Users/lpath to/rpkm_geneName_lenght.csv", sep=",", row.names=T, col.names=T, quote=F)
+#write.table(c5rpkm, "/Users/apth to /rpkm_geneName_lenght.txt", sep = "\t" , row.names=T, col.names=T, quote=F)
+
+```
+
+We have the data as matrix, we need to put it as data frame
+```{r df, warning=FALSE, message=FALSE}
+c5dt <- as.data.frame(c5_rlog)
+class(c5dt) # it is a dataframe
+```
+
+
+CMSclassifier needs the Entrez_IDs, so we add the annotation
+################################################################
+Annotation to add Entrez IDs
+CMSclassifier needs entrezIDs
+##############################################
+```{r annotation2, warning=FALSE, message=FALSE}
+columns(org.Hs.eg.db)  # Human
+#columns(org.Mm.eg.db)  # Mouse
+```
+
+We add the entrez-ids here as an extra column, at the end
+```{r enrezID2, warning=FALSE, message=FALSE}
+#with rlog
+#use symbols for gene names
+c5dt$entrzid <- mapIds(org.Hs.eg.db,
+                    keys=row.names(c5dt),
+                     column="ENTREZID",
+                     keytype="SYMBOL",
+                     multiVals="first")
+#with the other normlized matrix 
+
+head(c5dt)
+#there are several genes that we did not get the Entrez ids, so next step is remove the NAs
+dim(c5dt)
+
+# reomover the na rows
+c5dt_clean <- na.omit(c5dt)
+
+#how much it is reduced
+dim(c5dt_clean)
+#[1] 18114    69 # with symbols
+#Using genename, I only got 31 matches out ot 21343 genes 
+#this is with ensel ids
+#[1] 17270    69
+
+class(c5dt_clean)
+
+```
+
+put the entrez ids as row names
+We have a problem when we do that, R is adding an X at teh beggining of the entrez-id number
+```{r rownames, warning=FALSE, message=FALSE}
+#row.names(cgfcounts) <- make.names(cgfcounts$external_gene_id, unique=T)
+#row.names(c5dt_clean) <- make.names(c5dt_clean$entrzid, unique = T)
+row.names(c5dt_clean) <- c5dt_clean$entrzid  #there is not repetiotions in the rownames (No X)
+head(c5dt_clean)
+dim(c5dt_clean)
+```
+
+remove entrez column and make it matrix again, I need a dataframe for CMSclassifier
+```{r save, warning=FALSE, message=FALSE}
+c5mtx <-as.matrix(c5dt_clean[,-69])
+write.csv(c5mtx, "/Users/path to /name_entrezID.csv", sep=",", row.names=T, col.names=T, quote=F)
+write.table(c5mtx, "/Users/path to/name_entrezID.txt", sep="\t", row.names=T, col.names=T, quote=F)
+```
+
+#############################################################################################################################
+#############################################################################################################################
+## Staring with the classifier part, before it was only formating 
+
+load the matrix with the entrez ids
+```{r checkmatrix, warning=FALSE, message=FALSE}
+#load the data, if I do not have it here, I do not need to load data
+#cmstest <- as.matrix(read.delim("/Users/path to /name_entrezID.txt", sep = "\t", header = T, row.names = 1))
+#head(cmstest)[,1:2]
+#class(cmstest)
+#dim(cmstest)
+
+#since I was working with the formatting, I can check again before agoign forward
+ class(c5mtx)
+ #head(c5mtx)
+ dim(c5mtx)
+
+#Now I chage the name of the file and round to two digits
+cmstest <- round(c5mtx, digits = 2)
+#cmstest <- as.matrix(cmstest)
+head(cmstest)[,1:2]
+class(cmstest)
+dim(cmstest)
+```
+
+Synapser log in
+I only need this account to run the example
+```{r synapser, warning=FALSE, message=FALSE}
+#this should be only for the frist time lig in
+synLogin("user", "password")# rememberMe = T)
+#then with this should be ok
+#synLogin()
+```
+Examples code from github, not working loading the data
+```{r githubExamples, warning=FALSE, message=FALSE}
+#sample data in this way is not working:
+#sampleData <- read.table(synGet("syn4983432")@filePath, sep="\t",header = TRUE,row.names = 1,check.names=FALSE)
+
+#do as:
+synpfile <- (synGet("syn4983432"))
+#sdt <- read.table(synpfile$path, nrows = 2)
+sampleData <- read.table(synpfile$path, sep="\t",header = TRUE,row.names = 1,check.names=FALSE)
+#in case we want to save the example dara to take a look
+#write.table(head(sampleData),"/Users/ path to /exampleData.txt",  sep="\t", row.names=T, col.names=T, quote=F)
+write.csv(head(sampleData),"/Users/ path to /exampleData.csv")
+
+
+#Example data has the genes (entrez-id) as columns, that is why is transpose in the code
+#run the example, be careful with the t (transpose)
+Rfcms <- CMSclassifier::classifyCMS(t(sampleData),method="RF")[[3]]
+SScms <- CMSclassifier::classifyCMS(t(sampleData),method="SSP")[[3]]
+```
+
+
+Make it as data frame
+```{r 2df, warning=FALSE, message=FALSE}
+cmstestdf <- as.data.frame(cmstest)
+```
+
+Random forest
+NO NEED TO TRANSPOSE DATA
+```{r randomforest, warning=FALSE, message=FALSE}
+Rfcms2 <- CMSclassifier::classifyCMS(cmstestdf, method="RF")[[3]]
+```
+Single Sample
+```{r singleSample, warning=FALSE, message=FALSE} 
+SScms2 <- CMSclassifier::classifyCMS(cmstestdf,method="SSP")[[3]]
+```
+
+Save the data
+```{r save_out, warning=FALSE, message=FALSE}
+write.csv(Rfcms2,"/Users// path to //RFCMS2_C5.csv")
+write.csv(SScms2,"/Users// path to /SSCMS2_C5.csv")
+
+```
+
+
+#############################################################################################################################
+#############################################################################################################################
+#############################################################################################################################
+#############################################################################################################################
+# CMScaller
+libraries
+```{r morelib, warning=FALSE, message=FALSE}
+library(limma)
+library(Biobase)
+library(BiocStyle)
+library(devtools)
+### install: latest version
+#devtools::install_github("Lothelab/CMScaller")
+library(CMScaller)
+library(edgeR)
+library(parallel)
+library(snow)
+library(plotrix)
+```
+
+CMScaller
+does not need Norm matrix, we can give the filter raw counts
+```{r quickStart, fig.cap="CMScaller graphic output. Left heatmap shows relative expression for template genes. Samples (columns) are ordered according to class predictions and confidence. The height of the white bars below gives the unadjusted prediction $p$-values. Genes (rows) are ordered according to class template. Heatmap color saturation indicates magnitude while red and blue indicate genes up and down relative to the sample mean. Right heatmap shows results for Camera gene set analysis. Heatmap color saturation indicates statistical significance and red and blue indicates direction of change."}
+
+# get RNA-seq counts 
+counts <- c5_etznotNorm # filter matrix Not Normalized
+head(counts[,1:2])
+# prediction and gene set analysis
+par(mfrow=c(1,2))
+res <- CMScaller(emat=counts, RNAseq=TRUE, FDR=0.05) #rowNames = "ensg"
+#res2 <- CMScaller(emat=cmstestdf  , RNAseq=TRUE, rowNames = "entrez", FDR=0.05)
+cam <- CMSgsa(emat=counts, class=res$prediction, RNAseq=TRUE)
+#cam <- CMSgsa(emat=cmstestdf, class=res2$prediction, RNAseq=TRUE, rowNames = "entrez")
+# comparison with true class
+#table(pred=res$prediction, true=crcTCGAsubset$CMS)
+head(res, n=3)
+#table(pred=res2$prediction, true=crcTCGAsubset$CMS)
+#head(res2, n=3)
+```
+Save the table data
+```{r tableSave, warning=FALSE, message=FALSE}
+write.csv(res, "/Users// path to //CMScaller_out.csv", sep=",", row.names=T, col.names=T, quote=F)
+write.table(res, "/Users// path to //CMScaller_out.txt", sep="\t", row.names=T, col.names=T, quote=F)
+```
+
+
+
+## Preparing custom templates
+Templates consists of sets of subtype-specific marker genes. `subDEG` performs `r Biocpkg("limma")` differential expression analysis for identification of such markers. Below, is an example on how to prepare custom templates based on a training set with known class labels. `doVoom=TRUE` enables voom transformation - required for proper *limma* modeling of RNA-sequencing counts [@law_voom:_2014].
+
+```{r makeTemplates, fig.keep="last", fig.height=4}
+emat <- c5_etznotNorm
+cms <- res$prediction
+train <- sample(seq_along(cms), size=length(cms)/(2))
+deg <- subDEG(emat[,train], class=cms[train], doVoom=TRUE)
+templates <- ntpMakeTemplates(deg, resDEG=TRUE, topN=50)
+templates$symbol <- fromTo(templates$probe)
+tail(templates,n=3)
+```
+
+
+
+## Gene Set Analysis 
+`subCamera` provides gene set analysis and visualization and is a wrapper functions for `camera` in the `r Biocpkg("limma")` package. `camera` controls for intra-set gene-wise correlations in order to reduce false-positive rate while retaining statistical power [@wu_camera:_2012; @ritchie_limma_2015]. `CMSgsa` provides preset gene sets to `subCamera`.
+
+```{r visGSA, message=TRUE, fig.cap="Gene Set Analysis (GSA) shows that CMS are biologically distinct.", fig.width=3}
+# increase left margins to accommodate gene set names
+par.old <- par()
+par(mfrow=c(1,1))#, mar=par.old$mar+c(0,4,0,0))
+subCamera(counts, cms, geneList=geneSets.CRC, doVoom=TRUE)
+# restore margins
+par(mar=par.old$mar)
+```
+
+
+
+## PCA Analysis 
+`subPCA` and `plotPC` provide convenient wrapper functions for `prcomp`. `subPCA` perform PCA on the input data and plot the resulting low-dimensional projection with samples colored according to either a continuous covariate (*e.g.* expression of gene of interest) or group (such as CMS). `plotPC` visualizes the most important variables.
+
+```{r visPCA, message=TRUE, fig.cap="Principal component analysis (PCA) and CMS. First two principal components seperates CMS (left) with CMS4 characgterized by high levels of THBS4 and low levels of CLCA1 (right)."}
+# increase left margins to accommodate gene set names
+par(mfrow=c(1,2))
+p <- subPCA(emat = counts, class = res$prediction, 
+            normMethod = "quantile", pch=16, frame=FALSE)
+plotPC(p, n=6, entrez=TRUE)
+```
+
+## Nearest Template Prediction
+`ntp` matches `templates$probe` against `rownames(emat)`. Missing features and features with `NA/NaN`'s are ignored in the prediction. `emat` should be row-wise centered and scaled. 
+
+```{r input, warning=FALSE, message=FALSE}
+# loads included emat, scales and centers
+emat <- counts
+emat_sc <- ematAdjust(emat, normMethod="quantile")
+head(emat_sc[,1:2])
+```
+
+
+
+
+########### The End
+```{r}
+sessionInfo()
+Sys.info()
+```

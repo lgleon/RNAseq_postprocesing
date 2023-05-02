@@ -1,0 +1,349 @@
+---
+title: "Script for filter, claculate Norm and plot heatmaps"
+author: "Leticia G Leon"
+date: "05/08/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(gplots)
+library(edgeR)
+library(DESeq2)
+library(FactoMineR)
+library(biomaRt)
+library(Rsubread)
+library(Biobase)
+library(getopt)
+library(vsn) 
+library(BiocParallel)
+library(GenomicAlignments)
+library(GenomicFeatures)
+library(Rsamtools)
+library(pheatmap)
+library(RColorBrewer)
+library(PoiClaClu)
+library(genefilter)
+library(ggbeeswarm)
+library(apeglm)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+library(ReportingTools)
+library(Gviz)
+library(sva)
+library(RUVSeq)
+library(hexbin)
+source("/path/diffexpr4.R")
+```
+
+### Setting WD
+```{r setwd, warning=FALSE, message=FALSE}
+setwd("/path/working_dir/")
+```
+
+Load data
+#we load the filter counts (without low counts data)
+```{r loadData, warning=FALSE, message=FALSE}
+#load the filter data
+f.counts <- read.delim("/path to filter data.txt", header = T, sep = "\t", as.is = T, row.names = 1)
+#this is in case we did not remove the columns at the beginning
+f.counts <- f.counts[,-c(1:4)] 
+
+head(f.counts)
+#laod metadata
+ss <- read.csv("/path/metadata.csv",   sep = ";")
+head(ss)
+
+
+```
+
+Creating a DESeq2 object, linking with counts and metadata
+```{r DESeq2object, warning=FALSE, message=FALSE}
+ddsMatN <- DESeqDataSetFromMatrix(countData = f.counts[,-1], 
+                                 colData = ss,
+                                 design = ~ TypeLession ) #here use and var column in the ss that you will use as design model
+```
+
+##Calculate rlog (this is a type of Normalization, very good for visualization and plotting)
+```{r rlog, warning=FALSE, message=FALSE}
+ddsN_rlog <- rlog(ddsMatN, blind = T,   fitType = "mean") #blind is to make it completely unsupervised, no looking at the conditions or not 
+head(assay(ddsN_rlog)) #this is because the data is store at the assay slot (R)
+```
+
+Represent rlog versus a typical log2 transformation of the data
+sanitary check
+```{r plot_rlog,  warning=FALSE, message=FALSE}
+ddsMatN <- estimateSizeFactors(ddsMatN)
+
+df <- bind_rows(
+  as_data_frame(log2(counts(ddsMatN, normalized=T)[,1:2]+1)) %>%
+    mutate(transformation="log2(x+1)"),
+  #as_data_frame(assay(dds_vst)[, 1:2]) %>% dplyr::mutate(transformation = "vst"),
+  as_data_frame(assay(ddsN_rlog)[,1:2])%>% mutate(transformation="rlog"))
+
+colnames(df)[1:2] <- c("x", "y")
+
+ggplot(df, aes(x=x, y=y)) + 
+  geom_hex(bins = 80) +
+  coord_fixed() +
+  facet_grid(. ~ transformation)
+  
+```
+########################################################################################################################################################################################################################################################################################################################
+# Data  checking after rlog Normalization, using rlog(DESeq2) tools
+#### Now we check the distances using the rlog matrix
+```{r distance, warning=FALSE, message=FALSE}
+#withNormals
+sampleDists <- dist(t(assay(ddsN_rlog)))
+
+#sampleDist
+sampleDistMatrix <- as.matrix( sampleDists )
+rownames(sampleDistMatrix) <- paste(ddsN_rlog$Patient.ID, ddsN_rlog$TypeLession, sep = " - " )
+colnames(sampleDistMatrix) <- NULL
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows = sampleDists,
+         clustering_distance_cols = sampleDists,
+         col = colors)
+```
+
+#### Calculate and see rlog data as poisson distribution
+```{r, warning=FALSE, message=FALSE}
+#withNormals
+poisd <- PoissonDistance(t(counts(ddsMatN)))
+
+samplePoisDistMatrix <- as.matrix( poisd$dd )
+rownames(samplePoisDistMatrix) <- paste( ddsMatN$Patient.ID, ddsMatN$TypeLession, sep=" - " )
+colnames(samplePoisDistMatrix) <- NULL
+pheatmap(samplePoisDistMatrix,
+         clustering_distance_rows = poisd$dd,
+         clustering_distance_cols = poisd$dd,
+         col = colors)
+```
+
+#### PCA
+```{r, warning=FALSE, message=FALSE}
+#withNormals
+plotPCA(ddsN_rlog, intgroup = c("TypeLession", "Grade_dysplasia"))
+
+
+# Using day and type column information for the PCAs
+pcaData <- plotPCA(ddsN_rlog, intgroup = c( "TypeLession", "Grade_dysplasia"), returnData = TRUE)  
+pcaData
+
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+
+ggplot(pcaData, aes(x = PC1, y = PC2, color = TypeLession, shape = Grade_dysplasia)) +
+  geom_point(size =3) +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  coord_fixed()
+
+## Here with day and group the PCAs
+pcaDatag <- plotPCA(ddsN_rlog, intgroup = c( "Grade_dysplasia", "TypeLession"), returnData = TRUE)
+pcaDatag
+
+percentVar <- round(100 * attr(pcaData, "percentVar")) # Is giving how much this Variab contribute in the PCA in 100% 
+
+ggplot(pcaDatag, aes(x = PC1, y = PC2, color = Grade_dysplasia, shape = TypeLession)) +
+  geom_point(size =3) +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +  # How is going to appear in the plot
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  coord_fixed()
+
+```
+
+##################################################################################################################################
+
+Extra-visualization, using zscores and other methods
+
+##################################################################################################################################
+
+####Load Norm data
+For rlog Norm data, don't need to load anything, just use your recently rlog transformed data 
+But we can load other Norm data (rpkm, tpm or fpkm)
+```{r loadNormdata, message=FALSE, warning=FALSE}
+org.rlog <- read.delim("/path/data_rlogNorm.txt", header = T, sep = "\t", as.is = T, row.names = 1)
+head(org.rlog)
+org.rpkm <- read.delim("//rpkm_data.txt", header = T, sep = "\t", as.is = T, row.names = 1)
+head(org.rpkm)
+#metadata again, could be hte same one as before
+ss_ <- read.csv("/path/ss_norm_.csv",   sep = ";")
+head(ss_)
+
+```
+
+We can even use a subset of data, selecting specific genes
+Selection of the genes MACROD2, WWOX, FHIT, PRKN, NOTCH2, etc etc
+```{r geneselct, warning=FALSE, message=FALSE}
+ five.org.rlog<- org.rlog[c("MACROD2", "WWOX", "FHIT", "PRKN", "NOTCH2"),]
+head(five.org.rlog)
+five.org.rpkm <- org.rpkm[c("MACROD2", "WWOX", "FHIT", "PRKN", "NOTCH2"),]
+head(five.org.rpkm)
+
+```
+
+Make a unsupervised heatmap, with the entire matrix and the selected genes 
+```{r heatmpa1, message=FALSE, warning=FALSE}
+heatmap(as.matrix(org.rlog))
+heatmap(as.matrix(org.rpkm))
+heatmap(as.matrix(five.org.rlog))
+heatmap(as.matrix(five.org.rpkm))
+```
+same as before but using another function, heatmaps are slightly different
+```{rheatmap2,  message=FALSE, warning=FALSE}
+heatmap.2(as.matrix(org.rlog), trace = "none")
+heatmap.2(as.matrix(org.rpkm), trace = "none")
+heatmap.2(as.matrix(five.org.rlog), trace = "none")
+heatmap.2(as.matrix(five.org.rpkm), trace = "none")
+```
+
+Calculo de Zscore 
+```{r Zscore, message=FALSE, warning=FALSE}
+m_all <- rowMeans(org.rlog)
+sd_all <- rowSds(org.rlog)
+for(i in 1:nrow(org.rlog)) org.rlog[i,] <- (org.rlog[i,] -m_all[i])/sd_all[i]
+```
+Now we make the same heatmap usign the Zscores values
+```{r heatmZscore, message=FALSE, warning=FALSE}
+heatmap.2(as.matrix(org.rlog), trace = "none")
+```
+
+More elaborate heatmaps and save as pdf
+```{r niceheatmap1, message=FALSE, warning=FALSE}
+#splmat <- data.matrix(countsup)
+#splnames <- rownames(splmat)
+pdf("Clustering data.pdf")
+par(mfrow = c(1,1))
+my_palette <- colorRampPalette(c("darkblue", "grey","red"))(n = 299)
+#col_breaks = c(seq(-6.0,-0.2,length=100),seq(-0.1,0.1,length=100), seq(0.2,6.0,length=100))
+#png("tpll_zscore.png",width = 5*900, height = 5*900, res = 600, pointsize = 9) 
+heatmap.2(as.matrix(org.rlog),
+  #cellnote = splmat,  # same data set for cell labels
+  Colv = T,
+  Rowv = T,
+  scale = "row",
+  na.rm = TRUE,
+  dendrogram = "row",
+  main = "Clustering Data", # heat map title
+  #notecol="black",      # change font color of cell labels to black
+  density.info="none",  # turns off density plot inside color legend
+  trace="none",         # turns off trace lines inside the heat map
+  margins =c(10, 10),     # widens margins around plot
+  col=my_palette,       # use on color palette defined earlier
+  key = TRUE)
+  #breaks=col_breaks)    # enable color transition at specified limits 
+ 
+dev.off()
+my_group = as.numeric(as.factor(substr(colnames(org.rlog), 1, 1)))
+my_col=brewer.pal(5,"Blues")[my_group]
+heatmap(as.matrix(org.rlog), scale = "row", col=heat.colors(256), main="Clustering data", ColSideColors = my_col, margins = c(10,10))
+```
+
+Clustering using different distance and hclust for columns and rows
+```{r cluster1, message=FALSE, warning=FALSE}
+pdf("Spearman-row-Pearson-col_c-Ward_.pdf")
+# with method = ward.D2
+#my_palette <- colorRampPalette(c("blue","grey", "red"))(n = 299)
+hr2 <- hclust(as.dist(1-cor(t(as.matrix(org.rlog)), method="spearman")), method="ward.D2") # Clusters rows by Spearman correlation as distance method, with ward.D2
+hc2 <- hclust(as.dist(1-cor(as.matrix(org.rlog), method="pearson")), method="ward.D2") # Clusters columns by Spearman correlation as distance method, with ward.D2
+heatmap.2(as.matrix(org.rlog), Rowv=as.dendrogram(hr2), Colv=as.dendrogram(hc2), scale = "row", trace = "none", margins =c(10, 10), col = my_palette)
+dev.off()
+```
+
+```{r cluster2, message=FALSE, warning=FALSE}
+pdf("Spearman-col-Pearson-row_c-Ward_.pdf")
+# with method = ward.D2
+#my_palette <- colorRampPalette(c("blue","grey", "red"))(n = 299)
+hr2 <- hclust(as.dist(1-cor(t(as.matrix(org.rlog)), method="pearson")), method="ward.D2") # Clusters rows by Spearman correlation as distance method, with ward.D2
+hc2 <- hclust(as.dist(1-cor(as.matrix(org.rlog), method="spearman")), method="ward.D2") # Clusters columns by Spearman correlation as distance method, with ward.D2
+heatmap.2(as.matrix(org.rlog), Rowv=as.dendrogram(hr2), Colv=as.dendrogram(hc2), scale = "row", trace = "none", margins =c(10, 10), col = my_palette)
+dev.off()
+```
+
+
+##################################################################################################################################
+# This part is a repetition adapted for the small matrix of the genes previously selected
+Calculate zscore
+```{r message=FALSE, warning=FALSE}
+m_all <- rowMeans(five.org.rlog)
+sd_all <- rowSds(five.org.rlog)
+for(i in 1:nrow(five.org.rlog)) five.org.rlog[i,] <- (five.org.rlog[i,] -m_all[i])/sd_all[i]
+```
+```{r message=FALSE, warning=FALSE}
+heatmap.2(as.matrix(five.org.rlog), trace = "none")
+```
+More elaborate heatmaps and save as pdf
+```{r message=FALSE, warning=FALSE}
+#splmat <- data.matrix(countsup)
+#splnames <- rownames(splmat)
+pdf("Fivegenesselected_.pdf")
+#par(mfrow = c(1,1))
+my_palette <- colorRampPalette(c("darkblue", "grey","red"))(n = 299)
+#col_breaks = c(seq(-6.0,-0.2,length=100),seq(-0.1,0.1,length=100), seq(0.2,6.0,length=100))
+#png("tpll_zscore.png",width = 5*900, height = 5*900, res = 600, pointsize = 9) 
+heatmap.2(as.matrix(five.org.rlog),
+  #cellnote = splmat,  # same data set for cell labels
+  Colv = TRUE,
+  Rowv = TRUE,
+  scale = "row",
+  na.rm = TRUE,
+  dendrogram = "both",
+  main = "zscore_5genes", # heat map title
+  #notecol="black",      # change font color of cell labels to black
+  density.info="none",  # turns off density plot inside color legend
+  trace="none",         # turns off trace lines inside the heat map
+  margins =c(10, 10),     # widens margins around plot
+  col=my_palette,       # use on color palette defined earlier
+  key = TRUE)
+  #breaks=col_breaks)    # enable color transition at specified limits 
+ 
+dev.off()
+my_group = as.numeric(as.factor(substr(colnames(five.org.rlog), 1, 1)))
+my_col=brewer.pal(5,"Blues")[my_group]
+heatmap(as.matrix(five.org.rlog), scale = "row", col=heat.colors(256), main="5genes", ColSideColors = my_col, margins = c(10,10))
+```
+
+Clustering using different distance and hclust for columns and rows
+```{r message=FALSE, warning=FALSE}
+pdf("Spearman-row-Pearson-col_c-Ward_5genes_.pdf")
+# with method = ward.D2
+#my_palette <- colorRampPalette(c("blue","grey", "red"))(n = 299)
+hr2 <- hclust(as.dist(1-cor(t(as.matrix(five.org.rlog)), method="spearman")), method="ward.D2") # Clusters rows by Spearman correlation as distance method, with ward.D2
+hc2 <- hclust(as.dist(1-cor(as.matrix(five.org.rlog), method="pearson")), method="ward.D2") # Clusters columns by Spearman correlation as distance method, with ward.D2
+heatmap.2(as.matrix(five.org.rlog), Rowv=as.dendrogram(hr2), Colv=as.dendrogram(hc2), scale = "row", trace = "none", margins =c(10, 10), col = my_palette)
+dev.off()
+```
+
+```{r message=FALSE, warning=FALSE}
+pdf("Spearman-col-Pearson-row_c-Ward_5genes_.pdf")
+# with method = ward.D2
+#my_palette <- colorRampPalette(c("blue","grey", "red"))(n = 299)
+hr2 <- hclust(as.dist(1-cor(t(as.matrix(five.org.rlog)), method="pearson")), method="ward.D2") # Clusters rows by Spearman correlation as distance method, with ward.D2
+hc2 <- hclust(as.dist(1-cor(as.matrix(five.org.rlog), method="spearman")), method="ward.D2") # Clusters columns by Spearman correlation as distance method, with ward.D2
+heatmap.2(as.matrix(five.org.rlog), Rowv=as.dendrogram(hr2), Colv=as.dendrogram(hc2), scale = "row", trace = "none", margins =c(10, 10), col = my_palette)
+dev.off()
+```
+
+plot distribution
+```{r message=FALSE, warning=FALSE}
+hist(org.rlog)
+```
+
+#those are Norm data, no sirve apra esto
+```{r message=FALSE, warning=FALSE}
+stable.org.rlog<- org.rlog[c("ACTB", "GAPDH"),]
+head(stable.org.rlog)
+```
+
+
+
+
+########### The End
+```{r}
+sessionInfo()
+Sys.info()
+```

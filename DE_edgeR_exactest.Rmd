@@ -1,0 +1,243 @@
+---
+title: "DE Analyis using edgeR exact test"
+author: "Leticia"
+date: "03/08/2021"
+output: html_document
+---
+
+# Load libraries
+```{r setup, include=FALSE}
+library(tidyverse)
+library(edgeR)
+library(limma)
+library(tidyr)
+library(dplyr)
+library(FactoMineR)
+library(ggplot2)
+library(gplots)
+library(marray)
+library(affy)
+library(CLL)
+library(Biobase)
+library(dendroextras)
+library(RColorBrewer)
+library(biomaRt)
+source("/path/diffexpr4.R")
+```
+# Set the working directory
+```{r workingdirectory, warning=FALSE, message=FALSE}
+setwd("/path/DE_analysis_exactest/")
+```
+
+#####################################################################################################################################################################
+
+#####################################################################################################################################################################
+## Load data, counts and metadata for the new2 from new2Base
+################################################################################
+```{r loadData, warning=FALSE, message=FALSE}
+f.counts<- read.table( "/path/filter RawCounts.counts", sep = "\t", header = TRUE, row.names = 1, as.is=T)
+head(f.counts)
+ss <- read.csv("/path/metadata.csv", sep = ",")
+#str(ss)
+#head(ss)
+#sanitary check to be sure that columns in counts as same as row in ss
+identical(as.character(ss$sample), colnames(f.counts))
+class(f.counts)
+```
+################################################################################
+## Now prepare the design model DE for exactest 
+################################################################################
+```{r DGElist, message=FALSE, warning=FALSE}
+#this work for coeficients and also for design
+design <- model.matrix(~ 0 + factor(ss$grp))
+colnames(design) <- levels(ss$grp)
+head(design)
+group <- ss$grp
+##### Norm
+D <- DGEList(counts = as.matrix(new2), group = group)
+plotMDS(D)
+Dnorm <- calcNormFactors( D )
+Dnorm$samples
+lin.norm.factors <- (sum(D$samples$lib.size)/nrow(D$samples))/ D$samples$lib.size
+lin.norm.factors
+##Calculating common and tagwise dispersion in one go, do no use with design, thisis for GLM-LRT models
+Dt <- estimateDisp(Dnorm)
+plotBCV(Dt)
+```
+##############################################
+####Pair comparisons
+```{r exactest_tablecreate, message=FALSE, warning=FALSE}
+et1 <- exactTest(Dt, pair = c("Crtl", "tumor1"))
+topTags(et1)
+Dt.lrt.table1 <- topTags( et1, n=nrow(Dt$counts) )$table
+plotMD(et1)
+abline(h=c(-1,1), col="green")
+```
+##############################################
+####### Data formatting
+```{r dataformatting, message=FALSE, warning=FALSE}
+#sorting by FDR
+sort_fdr <- sort(Dt.lrt.table1$FDR)<0.05
+pval <- topTags(et1, n=nrow(sort_fdr), adjust.method = "BH", sort.by = "PValue")$table
+dim(pval)
+#take only the significant (FDR)
+fdr_pass <- pval[(pval$FDR)<0.05,] # first cutt-off, FDR<0.05
+dim(fdr_pass)
+#from the significant take only the ones with logFC >1 (FC>2)
+lgfc_pass <- fdr_pass[which(abs(fdr_pass$logFC)>1),] # Second cutt-off, log2FC(abs=1) or FC(abs=2)
+lgfc_pass$FC <- 2^lgfc_pass$logFC
+dim(lgfc_pass)
+
+#save the data
+write.table(lgfc_pass, file="Signif_genelist_exact.txt", row.names = TRUE, col.names = NA, quote=FALSE, sep="\t")
+
+#Normalized counts
+tmm <- cpm(Dnorm, normalized.lib.sizes = TRUE)
+#tmm_gp <- cpmByGroup(y, group = NULL, dispersion = NULL, ...)
+#Nrpkm <- rpkm(Dnorm, gene.length = NULL, normalized.lib.sizes = NULL, log = FALSE )
+#Nrpkm_gp <-rpkmByGroup(y, group = NULL, gene.length = NULL, dispersion = NULL, ...)
+
+#we take the rows (significants genes) go to the Norm matrix and take the counts of the significant genes
+sign_tmm <- tmm[c(rownames(lgfc_pass)),]
+head(sign_tmm)  #####Careful is a Matrix
+dim(sign_tmm)
+sign_tmm <- as.data.frame(sign_tmm)
+#sign_tmm$mean_CD <- rowMeans(sign_tmm[,5:9])
+#sign_tmm$mean_TPLL <- rowMeans(sign_tmm[,35:55])
+head(sign_tmm)
+dim(sign_tmm)
+
+#save the counts of the significant genes 
+write.table(sign_tmm, file="Sign_geneCounts_exactt.txt", row.names = TRUE, col.names = NA, quote=FALSE, sep="\t")
+sign_DE_tmm <- cbind(lgfc_pass, sign_tmm)
+dim(sign_DE_tmm)
+head(sign_DE_tmm)
+write.table(sign_DE_tmm, file="Significant_geneCounts_exactt.txt", row.names = TRUE, col.names = NA, quote=FALSE, sep="\t")
+```
+###################
+###### plotMD
+```{r plotMD, message=FALSE, warning=FALSE}
+pdf("plotMD_exactt.pdf")
+plotMD.DGEExact(et1)
+dev.off()
+```
+##############################################
+######Curve for the Pvalues 
+```{r pvalCurve, message=FALSE, warning=FALSE}
+pdf("FDR_exactt.pdf")
+plot(sort(Dt.lrt.table1$FDR))
+abline(c(0,1/nrow(Dt.lrt.table1)), col="blue")
+dev.off()
+```
+##############################################
+#####To make the Boxplots
+```{r boxplot, message=FALSE, warning=FALSE}
+number_of_plots <- 100
+top_genes <- row.names(Dt.lrt.table1)[1:number_of_plots]
+pdf("boxplots_exactt.pdf")
+for (i in 1:length(top_genes))
+{
+ boxplot(as.numeric(log(cpm(Dnorm[which(rownames(Dnorm)==top_genes[i]), ])))~as.factor(ss$Type), main=paste(top_genes[i],"FDR", Dt.lrt.table1$FDR[which(rownames(Dt.lrt.table1)==top_genes[i])], sep= " "))
+}
+dev.off()
+```
+
+
+2 
+##############################################
+####Pair comparisons 2
+```{r exactest_tablecreate, message=FALSE, warning=FALSE}
+et2 <- exactTest(Dt, pair = c("Crtl", "tumor2"))
+topTags(et2)
+Dt.lrt.table2 <- topTags( et2, n=nrow(Dt$counts) )$table
+plotMD(et2)
+abline(h=c(-1,1), col="green")
+```
+##############################################
+####### Data formatting
+```{r dataformatting, message=FALSE, warning=FALSE}
+#sorting by FDR
+sort_fdr <- sort(Dt.lrt.table2$FDR)<0.05
+pval <- topTags(et2, n=nrow(sort_fdr), adjust.method = "BH", sort.by = "PValue")$table
+dim(pval)
+#take only the significant (FDR)
+fdr_pass <- pval[(pval$FDR)<0.05,] # first cutt-off, FDR<0.05
+dim(fdr_pass)
+#from the significant take only the ones with logFC >1 (FC>2)
+lgfc_pass <- fdr_pass[which(abs(fdr_pass$logFC)>1),] # Second cutt-off, log2FC(abs=1) or FC(abs=2)
+lgfc_pass$FC <- 2^lgfc_pass$logFC
+dim(lgfc_pass)
+
+#save the data
+write.table(lgfc_pass, file="Signif_genelist_exact.txt", row.names = TRUE, col.names = NA, quote=FALSE, sep="\t")
+
+#Normalized counts
+tmm <- cpm(Dnorm, normalized.lib.sizes = TRUE)
+#tmm_gp <- cpmByGroup(y, group = NULL, dispersion = NULL, ...)
+#Nrpkm <- rpkm(Dnorm, gene.length = NULL, normalized.lib.sizes = NULL, log = FALSE )
+#Nrpkm_gp <-rpkmByGroup(y, group = NULL, gene.length = NULL, dispersion = NULL, ...)
+
+#we take the rows (significants genes) go to the Norm matrix and take the counts of the significant genes
+sign_tmm <- tmm[c(rownames(lgfc_pass)),]
+head(sign_tmm)  #####Careful is a Matrix
+dim(sign_tmm)
+sign_tmm <- as.data.frame(sign_tmm)
+#sign_tmm$mean_CD <- rowMeans(sign_tmm[,5:9])
+#sign_tmm$mean_TPLL <- rowMeans(sign_tmm[,35:55])
+head(sign_tmm)
+dim(sign_tmm)
+
+#save the counts of the significant genes 
+write.table(sign_tmm, file="Sign_geneCounts_exactt.txt", row.names = TRUE, col.names = NA, quote=FALSE, sep="\t")
+sign_DE_tmm <- cbind(lgfc_pass, sign_tmm)
+dim(sign_DE_tmm)
+head(sign_DE_tmm)
+write.table(sign_DE_tmm, file="Significant_geneCounts_exactt.txt", row.names = TRUE, col.names = NA, quote=FALSE, sep="\t")
+```
+###################
+###### plotMD
+```{r plotMD, message=FALSE, warning=FALSE}
+pdf("plotMD_exactt.pdf")
+plotMD.DGEExact(et1)
+dev.off()
+```
+##############################################
+######Curve for the Pvalues 
+```{r pvalCurve, message=FALSE, warning=FALSE}
+pdf("FDR_exactt.pdf")
+plot(sort(Dt.lrt.table1$FDR))
+abline(c(0,1/nrow(Dt.lrt.table1)), col="blue")
+dev.off()
+```
+##############################################
+#####To make the Boxplots
+```{r boxplot, message=FALSE, warning=FALSE}
+number_of_plots <- 100
+top_genes <- row.names(Dt.lrt.table1)[1:number_of_plots]
+pdf("boxplots_exactt.pdf")
+for (i in 1:length(top_genes))
+{
+ boxplot(as.numeric(log(cpm(Dnorm[which(rownames(Dnorm)==top_genes[i]), ])))~as.factor(ss$Type), main=paste(top_genes[i],"FDR", Dt.lrt.table1$FDR[which(rownames(Dt.lrt.table1)==top_genes[i])], sep= " "))
+}
+dev.off()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+################################################################################################################################# The End
+```{r}
+sessionInfo()
+Sys.info()
+```

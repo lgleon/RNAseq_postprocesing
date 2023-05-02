@@ -1,0 +1,260 @@
+---
+title: "Filtering and Normalization for RNAseq data"
+author: "Leticia G Leon"
+date: "02/08/2021"
+output: html_document
+---
+```{r setup, include=FALSE}
+library(tidyverse)
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(gplots)
+library(edgeR)
+library(DESeq2)
+library(FactoMineR)
+library(data.table)
+#library(scater)
+library(biomaRt)
+library(Rsubread)
+library(Biobase)
+library(getopt)
+library(vsn) 
+library(BiocParallel)
+library(GenomicAlignments)
+library(GenomicFeatures)
+library(Rsamtools)
+library(pheatmap)
+library(RColorBrewer)
+library(PoiClaClu)
+library(genefilter)
+library(ggbeeswarm)
+library(apeglm)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+library(ReportingTools)
+library(Gviz)
+library(sva)
+library(RUVSeq)
+library(hexbin)
+source("/path/diffexpr4.R")
+```
+
+set working directory
+```{r workingdirectory, warning=FALSE, message=FALSE}
+setwd("/path to your working directory/")
+```
+
+Load data
+Here we load the file coming from featureCounts
+In the counts we have, start, end, strand and length as columns, we keep the length
+```{r loadData, warning=FALSE, message=FALSE}
+##### Remember the floating numbers in the Ensembl ids, only with exons
+raw.counts <- read.delim("/path/_cleanhead.counts", header = T, sep = "\t", as.is = T, row.names = 1)
+head(raw.counts)
+
+
+```
+
+Remove the columns at teh beggining, we just keep the length o
+```{r removeColumns, warning=FALSE, message=FALSE}
+raw.counts <- raw.counts[,-c(1:4)]
+head(raw.counts)
+```
+
+Remove/filter noise (lowcounts) genes before the normalization
+```{r filtering, warning=FALSE, message=FALSE}
+### If counts is not a matrix we need to make it a matrix
+#raw <- raw_f[, -c(1:4)]   #in case we did not remover the columns before, do it here
+keep_raw <- rowSums(edgeR::cpm(raw.counts[,-1])>2) >= 3  #where y is your matrix to be filtered and the values 1 and 2 should be adjusted accordingly to your data
+table(keep_raw) #to look whether you have a reasonable number of genes remaining after filtering
+raw_f <- raw.counts[keep_raw, ]
+dim(raw_f)
+head(raw_f)
+#save the filter counts in different formats
+write.csv(raw_f, "RNAngs_clean_lenght.csv", sep=",", row.names=T, col.names=T, quote=F)
+write.table(raw_f, "ngs_clean.txt", sep = "\t" , row.names=T, col.names=T, quote=F)
+write.table(raw_f, "RNA_clean_lenght.counts", sep = "\t" , row.names=T, col.names=T, quote=F)
+```
+
+
+################################################################################ Correlation check ####################
+## Pearson and Spearman correlation
+#Make Pearson Correlation_notNormalized
+```{r correlations, warning=FALSE, message=FALSE}
+corP.rawf <- cor(raw_f[,-1], method="pearson")
+# You can use the heatmap() function here
+pdf("Pearson_corr.pdf")
+par(mfrow = c(1,1))
+heatmap(corP.rawf, main="Pearson_correlation_raw")
+dev.off()
+#```
+#Now we calculate the Spearman correlation_not Normalized
+#```{r}
+corS.rawf <- cor(raw_f[,-1], method="spearman")
+# You can use the heatmap() function here
+pdf("Spearman_corr.pdf")
+par(mfrow = c(1,1))
+heatmap(corS.rawf, main="Spearman_correlation_raw")
+#dev.off()
+```
+
+#######################################################################################################################################################3
+#                       NormalizationS
+#################################################################################################################################################################
+
+##RPKM
+Calculate the rpkm, using the function of edgeR
+```{r rpkm, warning=FALSE, message=FALSE}
+
+n.rpkm <- rpkm(raw_f[,-1], gene.length = raw_f[,1])
+head(n.rpkm)
+
+#save the data
+write.table(n.rpkm, "/path/rpkm_.txt", sep = "\t" )
+```
+
+##################################################################
+Crating the functions for TPM AND FPKM, From here I used the FPKM
+###################################################################
+```{r funcTPM1, warning=FALSE, message=FALSE}
+countToTpm <- function(cuentas, effLen)
+{
+    rate <- log(cuentas) - log(effLen)
+    denom <- log(sum(exp(rate)))
+    exp(rate - denom + log(1e6))
+}
+```
+```{r funcFPKM, warning=FALSE, message=FALSE}
+countToFpkm <- function(counts, effLen)
+{
+    N <- sum(counts)
+    exp( log(counts) + log(1e9) - log(effLen) - log(N) )
+}
+```
+```{r func3, warning=FALSE, message=FALSE}
+fpkmToTpm <- function(fpkm)
+{
+    exp(log(fpkm) - log(sum(fpkm)) + log(1e6))
+}
+
+countToEffCounts <- function(counts, len, effLen)
+{
+    counts * (len / effLen)
+}
+```
+
+### Using the functions to calculate FPKM
+################################################################################
+I need the raw counts and the gene legth, as RPKM, loeaded
+
+```{r FPKM, warning=FALSE, message=FALSE}
+#countDf$effLength <- countDf$length - 203.7 + 1
+n.fpkm <- with(raw_f, countToFpkm(raw_f[,-1], raw_f$Length))
+```
+#Save data fpkm
+```{r savefpkm, warning=FALSE, message=FALSE}
+write.table(n.fpkm , "/path/fpkm_.txt", sep = "\t" , row.names=T, col.names=T, quote=F)
+```
+
+################################################################################
+###  another calculation and function for TPM
+#### Metodo dos, this one works well, previous one with the other functions is not working that well
+################################################################################
+# Methods to calculate the TPM (transcript per million)
+## Counts to TPM
+```{r funcTPM_2, warning=FALSE, message=FALSE}
+r_tpm <- function(dfr,len)
+{
+  dfr1 <- sweep(dfr,MARGIN=1,(len/10^4),`/`)
+  scf <- colSums(dfr1)/(10^6)
+  return(sweep(dfr1,2,scf,`/`))
+}
+```
+
+### This one works like that, is ok
+```{r tpm, warning=FALSE, message=FALSE}
+ n.tpm <- r_tpm(raw_f[,-1], raw_f$Length)
+```
+
+# save data
+```{r saveTPM, warning=FALSE, message=FALSE}
+write.table(n.tpm, "/path/tpm_.txt", sep = "\t" , row.names=T, col.names=T, quote=F)
+```
+
+
+################################################################################
+### FPKM using DESeq2
+################################################################################
+```{r deseq2_load, warning=FALSE, message=FALSE}
+countData <- raw_f[,-1]
+#countData <- read.delim("/media/immunology/Data/Tom_Group/Jorn_RNAseq_LGL/Clean_reads/Moreclean/LGL_ftc_evenmoreclean50.counts", header = T, sep = "\t", as.is = T, row.names = 1)
+#head(countData)
+colData <- read.csv("/path/metadata.csv", sep = ",")
+#head(colData)
+#```
+
+#```{r}
+ddsMat <- DESeqDataSetFromMatrix(countData = countData, 
+                                 colData = colData,
+                                 design = ~ type)
+mcols(ddsMat)
+
+```
+```{r deseq2_fpkm, warning=FALSE, message=FALSE}
+fpkm_deseq2 <- fpkm(ddsMat, robust = T)
+```
+
+
+
+
+################################################################################
+### 3 TPM
+################################################################################
+https://www.biostars.org/p/335187/
+#In the same web they have also this function:
+#```{r warning=FALSE, message=FALSE}
+# michael's version
+# https://support.bioconductor.org/p/91218/
+
+tpm3 <- function(counts,len) {
+  x <- counts/len
+  return(t(t(x)*1e6/colSums(x)))
+}
+
+#```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# System info
+```{r}
+sessionInfo()
+Sys.info()
+```
